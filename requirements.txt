@@ -1,0 +1,5 @@
+requests>=2.28
+pyyaml>=6.0
+# For library_session.py (institutional proxy path) only:
+patchright>=1.40      # stealth Playwright fork — passes Cloudflare headless
+ddddocr>=1.4          # offline numeric-CAPTCHA OCR

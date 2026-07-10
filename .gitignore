@@ -1,0 +1,19 @@
+# local config (holds your email / endpoints) — never commit
+config.yaml
+
+# secrets & session — must never be committed
+*.dpapi
+.paperfetch_profile/
+access_log.jsonl
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# staging PDFs / scratch
+*.pdf
+staging/

@@ -1,0 +1,38 @@
+# config.example.yaml — copy to config.yaml and fill in YOUR OWN values.
+#   cp config.example.yaml config.yaml
+# config.yaml is git-ignored. Credentials are NEVER in this file — they live in a local
+# secret store (see README: LIB_USER / LIB_PASS / *_TDM_KEY via DPAPI on Windows).
+#
+# This project ships NO institution's access. You supply your own library's endpoints
+# (ask your librarian / find them in your library portal) and your own account.
+
+# Your email — required by the Unpaywall API (free, just an identifier). REQUIRED for OA.
+unpaywall_email: ""
+
+# Optional: a local sqlite DB (table `papers(doi, oa_pdf_url)`) for an extra OA fallback.
+paper_radar_db: ""
+
+institution:
+  # Your library's link resolver (SFX / other OpenURL resolver). Find it in your library
+  # portal → e-resources → link resolver. {doi} is substituted at runtime. Leave blank to
+  # skip printing a resolver link. Example shape (NOT a real endpoint):
+  #   sfx_base: "https://YOUR-SFX-HOST/YOUR-INSTANCE?sid=Claude&id=doi:{doi}"
+  sfx_base: ""
+
+  # Your library's off-campus remote-auth gate (the login page for reading full text from
+  # home). Only needed for the institutional proxy path (library_session.py).
+  #   remote_auth_base: "https://YOUR-REMOTE-AUTH-HOST"
+  remote_auth_base: ""
+
+  # Your EZproxy/NetScaler proxy suffix (host[:port]) appended to the dash-rewritten
+  # publisher host, e.g. onlinelibrary-wiley-com.<proxy_suffix>. Ask your librarian.
+  #   proxy_suffix: "YOUR-PROXY-HOST:PORT"
+  proxy_suffix: ""
+
+rate:
+  # Courtesy delay (seconds) between proxy requests. 0 DISABLES it and prints a warning.
+  # Systematic/bulk download can get your whole institution's IP blocked — keep this on.
+  min_interval_s: 15
+  # Your email/handle — sent as a contact User-Agent on direct API routes so publishers
+  # can distinguish individual research use from systematic scraping.
+  contact: ""
