@@ -7,6 +7,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Documentation
+- Clarified a trap worth knowing before you trust any "no full text" verdict: **one route
+  failing does not mean the PDF doesn't exist.** A publisher's own platforms disagree —
+  e.g. an ahead-of-print article can be missing from the journal site's PDF viewer while the
+  aggregator (Ovid) serves it fine.
+- ⚠️ Some aggregators enforce **concurrent-licence seats**, not just rate limits. Hitting one
+  can return a licence-service error after a mere handful of requests, and that failure
+  happens *above* the proxy layer — so it never appears in `access_log.jsonl` or `stats`.
+  Tripping it degrades access for **everyone at your institution**. Don't automate through an
+  aggregator to grind a batch; fetch the odd stubborn paper by hand.
+
 ## [0.1.0] — 2026-07-10
 
 First public release. `paper_fetch.py` (OA / publisher TDM route ladder) is complete and
