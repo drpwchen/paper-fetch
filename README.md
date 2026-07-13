@@ -1,9 +1,32 @@
 # paper-fetch — a publisher-aware full-text PDF fetcher
 
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Sci-Hub: not in the architecture](https://img.shields.io/badge/Sci--Hub-not%20in%20the%20architecture-red)
+![Publisher routes verified](https://img.shields.io/badge/publisher%20routes-20%2B%20verified-brightgreen)
+
 Give it a DOI; it walks a **route ladder** to get the full-text PDF the cheapest, most
 legitimate way first — open access, then official publisher text-mining (TDM) APIs, then
 your own institutional library proxy, and finally it just prints your library's resolver
 link so you can finish by hand.
+
+**There is no Sci-Hub route in this architecture — not disabled, not opt-in: absent.**
+Most tools in this space keep piracy as a "last resort" fallback. This one is built on the
+opposite bet: with OA indexes + sanctioned TDM APIs + the subscription access you already
+pay for, a legitimate ladder covers nearly everything — and the gap that remains is a
+*library entitlement problem* you can see and fix, not a reason to route around the law.
+
+```bash
+# 30 seconds to first PDF (OA route needs zero keys — just your email in config.yaml)
+git clone https://github.com/drpwchen/paper-fetch && cd paper-fetch
+pip install -r requirements.txt && cp config.example.yaml config.yaml   # set unpaywall_email
+python paper_fetch.py 10.1186/s12984-023-01168-x out.pdf
+
+# agent mode: one JSON envelope on stdout, diagnostics on stderr, typed exit codes
+python paper_fetch.py --json 10.1016/j.apmr.2022.01.006 out.pdf
+# {"schema": 1, "doi": "...", "ok": true, "route": "elsevier", "tried": ["elsevier"],
+#  "bytes": 117204, "sha256": "57ee4e...", "path": "out.pdf", "elapsed_s": 1.4}
+```
 
 It's the **download end** of a small paper pipeline. The **reading end**
 ([claude-paper-tools](https://github.com/drpwchen/claude-paper-tools): appraisal +
@@ -99,6 +122,27 @@ the PDF endpoint — indistinguishable from a broken template. Sage, T&F, Oxford
 each wrongly declared routeless on this basis. Verify entitlement (journal + coverage year)
 against your library's holdings **before** concluding a route is broken.
 
+## How this compares to other paper fetchers
+
+Plenty of tools turn a DOI into a PDF. They differ on two axes: *where the PDFs come from*
+and *what happens when a route fails*.
+
+| Capability | OA-only clients (unpywall, …) | Sci-Hub-based (PyPaperBot, scidownl, …) | Multi-source w/ piracy fallback | **paper-fetch** |
+|---|---|---|---|---|
+| Open-access ladder (Unpaywall + S2 + PMC/Europe PMC + `citation_pdf_url`) | partial (usually one index) | — | ✅ | ✅ two independent OA indexes + PMCID direct-conversion |
+| Official publisher TDM APIs (your own keys) | — | — | rare | ✅ Elsevier · Wiley · Springer |
+| Institutional proxy layer (your own login, persistent session) | — | — | IP/cookie passthrough at best | ✅ full remote-auth walk, session survives reboots |
+| Per-publisher route shapes (URL template / `citation_pdf_url` / headful CF nav / multi-step signed-URL) | — | — | generic stealth browser | ✅ 20+ verified, named, documented |
+| **Entitlement ground truth** (your library's A–Z holdings → local SQLite, checked *before* blaming a route) | — | — | — | ✅ unique, as far as we know |
+| Route health from access logs (`stats`, per-route success history) | — | — | — | ✅ |
+| `%PDF` magic-byte validation | rare | rare | some do | ✅ |
+| Agent-native output (`--json` envelope, typed exit codes) | — | — | some do | ✅ |
+| Sci-Hub | — | the whole product | final fallback, on by default | **absent by design** |
+
+The two rows nothing else has — entitlement ground truth and log-driven route health — exist
+because they answer the question every other tool leaves you guessing on: **"is this route
+broken, or do I just not have access to this article?"** (See the entitlement trap above.)
+
 ## What's public here vs. what you supply
 
 | Layer | This repo | You supply |
@@ -120,7 +164,7 @@ These are the sanctioned routes. Register for your own credentials:
 | Publisher | Route | How to get access |
 |---|---|---|
 | **Unpaywall** | `api.unpaywall.org/v2/{doi}?email=you@x` | Free. Just pass your email. OA only. |
-| **Elsevier TDM** | `api.elsevier.com/content/article/doi/{doi}?view=FULL` | Register at [dev.elsevier.com](https://dev.elsevier.com); header `X-ELS-APIKey`. Off-campus paywalled content also needs an `X-ELS-Insttoken` from your library. |
+| **Elsevier TDM** | `api.elsevier.com/content/article/doi/{doi}` with `Accept: application/pdf` — do **not** add `view=FULL`; it's unnecessary for PDF and gets rejected (`400 INVALID_INPUT`) for a subset of articles, masquerading as a coverage gap | Register at [dev.elsevier.com](https://dev.elsevier.com); header `X-ELS-APIKey`. Off-campus paywalled content also needs an `X-ELS-Insttoken` from your library. |
 | **Wiley TDM** | `api.wiley.com/onlinelibrary/tdm/v1/articles/{doi}` | Accept the click-through at [static.wiley.com/tdm](https://static.wiley.com/tdm/); header `Wiley-TDM-Client-Token`. |
 | **Springer** | `api.springernature.com/openaccess/json?q=doi:{doi}` | Register at [dev.springernature.com](https://dev.springernature.com). OA direct (`link.springer.com/content/pdf/{doi}.pdf`) often works with no key. |
 | **Crossref / Europe PMC** | metadata + OA full text | No key. Great for resolving and for PMC-hosted OA. |
@@ -142,6 +186,21 @@ library's public infrastructure. Where to find them:
 
 If your library uses **EZproxy** (very common), the rewrite is usually `dots→dashes` +
 a fixed proxy suffix, exactly the pattern `_proxy_host()` implements.
+
+### Which off-campus family is your library? (adapt `login()` accordingly)
+
+Every library wires off-campus access as one of four families. Identify yours first — it
+decides how much of `login()` you need to write:
+
+| Family | How you recognize it | What to implement |
+|---|---|---|
+| **EZproxy** | publisher hosts get rewritten to `host-with-dashes.proxy.yourlib.edu` | mostly nothing beyond `proxy_suffix` + a form login — the closest fit to this codebase |
+| **OpenAthens / Shibboleth** | login bounces through `login.openathens.net` or your university SSO (SAML) | drive the SSO redirect chain once in the headful browser; the persistent profile then keeps the session |
+| **VPN** | you install a VPN client and publishers just see campus IP | *no proxy layer needed at all* — run only the OA/TDM half, publishers serve PDFs directly |
+| **Custom portal** (NetScaler, homegrown) | a bespoke "remote reader authentication" page | write the login walk against that portal — this repo's stub documents one worked example |
+
+In all four cases the *rest* of the machinery (route shapes, entitlement table, access log,
+throttle, response classifier) is family-agnostic — `login()` is the only part that is yours.
 
 ## Install
 
@@ -169,6 +228,7 @@ your own if you're not on Windows DPAPI.)
 
 ```bash
 python paper_fetch.py 10.1371/journal.pone.0000000 out.pdf   # OA / TDM — works out of the box
+python paper_fetch.py --json 10.1016/xxx out.pdf             # agent mode: JSON envelope on stdout
 python library_session.py check                              # proxy layer (after you implement login)
 python library_session.py fetch 10.1002/xxxxx out.pdf
 python library_session.py stats                              # rate / block analysis
@@ -176,15 +236,28 @@ python library_session.py stats                              # rate / block anal
 
 `examples/example-note.md` shows the intended Zotero + Obsidian workflow around it.
 
-### Exit codes (script it accordingly)
+### Agent mode (`--json`)
+
+`paper_fetch.py --json` prints **exactly one JSON envelope on stdout** (all diagnostics go
+to stderr), so an orchestrator can `json.loads` the last line without scraping logs:
+
+```json
+{"schema": 1, "doi": "…", "ok": true, "route": "elsevier", "tried": ["elsevier"],
+ "bytes": 117204, "sha256": "…", "path": "out.pdf", "elapsed_s": 1.4}
+```
+
+On failure `ok` is `false`, `tried` lists every route attempted, and `resolver_url` carries
+your library's SFX link for a manual finish. `sha256` lets batch callers dedupe.
+
+### Exit codes (one table for both scripts)
 
 | Code | Meaning | What the caller should do |
 |---|---|---|
-| `0` | PDF written | validate `%PDF`, carry on |
+| `0` | PDF obtained | validate `%PDF`, carry on |
 | `1` | usage error | fix the command |
 | `2` | no route / auth failed | genuinely unavailable — stop |
-| `4` | profile busy (another fetch holds the lock) | **retry serially** — not a missing paper |
-| `5` | watchdog abort (`PAPERFETCH_TIMEOUT_S`, default 240 s) | **retry once** — not a missing paper |
+| `4` | profile busy (another fetch holds the lock) — `library_session.py` only | **retry serially** — not a missing paper |
+| `5` | watchdog abort (`PAPERFETCH_TIMEOUT_S`, default 240 s) — `library_session.py` only | **retry once** — not a missing paper |
 
 ==Codes `4` and `5` mean "try again, one at a time" — never record them as "no full text."==
 Conflating them is the single easiest way to wrongly conclude a paper is unobtainable.

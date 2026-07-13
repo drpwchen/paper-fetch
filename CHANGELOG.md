@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-14
+
+### Added
+- **Agent mode: `paper_fetch.py --json`.** Prints exactly one JSON envelope on stdout
+  (`{schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?, elapsed_s}`);
+  all route diagnostics are rerouted to stderr. Built for LLM-agent / batch orchestration:
+  parse stdout, branch on typed exit codes, dedupe on `sha256`.
+- README: capability-comparison table vs. other fetcher families (OA-only clients,
+  Sci-Hub-based, multi-source-with-piracy-fallback), an explicit statement that Sci-Hub is
+  absent from this architecture by design, a 30-second quickstart with a verified OA DOI,
+  badges, and a four-family guide (EZproxy / OpenAthens–Shibboleth / VPN / custom portal)
+  to identifying your library's off-campus setup and what `login()` work each implies.
+
+### Changed
+- **`paper_fetch.py` exit codes now match `library_session.py`'s table**: `0` PDF obtained ·
+  `1` usage error · `2` all automatic routes exhausted. Previously usage errors exited `1`
+  via a bare `sys.exit(msg)` and route exhaustion exited `2` — the numbers are unchanged in
+  effect, but they are now an explicit, documented contract shared by both scripts.
+
 ## [0.3.1] — 2026-07-14
 
 ### Fixed
@@ -123,6 +142,9 @@ inherently specific to your own library and must be implemented against it.
   ahead-of-print articles routinely report OA while offering no `url_for_pdf`. Fall through
   to the institutional route instead of concluding the paper is unavailable.
 
-[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/drpwchen/paper-fetch/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/drpwchen/paper-fetch/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/drpwchen/paper-fetch/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/drpwchen/paper-fetch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/drpwchen/paper-fetch/releases/tag/v0.1.0
