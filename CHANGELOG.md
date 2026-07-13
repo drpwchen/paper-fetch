@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-07-14
+
+### Fixed
+- **Elsevier TDM: dropped the `view=FULL` query parameter.** With `Accept: application/pdf`
+  it is unnecessary, and Elsevier rejects it with `HTTP 400 INVALID_INPUT ("View parameter
+  specified in request is not valid")` for a subset of articles — observed on several
+  *Archives of PM&R* DOIs across publication years, while the identical request without the
+  parameter returns the PDF. The 400 masqueraded as a coverage gap for an entire journal.
+  Lesson: on a 400 from a TDM API, read the error body — the status code alone misleads.
+
 ## [0.3.0] — 2026-07-14
 
 ### Added

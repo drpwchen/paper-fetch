@@ -73,8 +73,12 @@ def route_elsevier(doi):
     if insttoken:
         headers["X-ELS-Insttoken"] = insttoken
     url = f"https://api.elsevier.com/content/article/doi/{doi}"
+    # No "view" param: with Accept: application/pdf it is unnecessary, and view=FULL
+    # gets rejected (HTTP 400 INVALID_INPUT "View parameter ... not valid") for a
+    # subset of articles (observed on several Archives of PMR DOIs) while the same
+    # request without it returns the PDF fine.
     try:
-        r = requests.get(url, headers=headers, params={"view": "FULL"}, timeout=90)
+        r = requests.get(url, headers=headers, timeout=90)
     except Exception as e:
         print(f"  Elsevier 連線失敗: {e}")
         return None
