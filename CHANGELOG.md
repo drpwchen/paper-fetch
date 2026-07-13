@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-07-14
+
+### Added
+- **Semantic Scholar `openAccessPdf` fallback** in the OA layer (`paper_fetch.py`). It's an
+  OA index independent of Unpaywall — it catches preprint-server and some hybrid-OA PDFs that
+  Unpaywall misses. No API key required (429 is silently skipped).
+- **Headful-navigation variant of the citation-meta route** (`_HEADFUL_META_PREFIXES`,
+  `_citation_meta_pdf(nav=True, host=…)`). Some publishers front the resolver with a
+  Cloudflare challenge that blocks headless requests; a real headful navigation clears it.
+  Highwire sites additionally need an explicit resolver `host` (their generic `doi-org`
+  resolver loops). Enables BMJ (`10.1136`), AJNR (`10.3174`), J Nucl Med (`10.2967`).
+- More verified template/meta publishers: AJR (`10.2214`), Radiology/RSNA (`10.1148`),
+  World Scientific (`10.1142`), Pediatrics (`10.1542`), European Respiratory J (`10.1183`),
+  J Neurosurg (`10.3171`), Nature (`10.1038`).
+
+### Changed
+- **Corrected the BMJ verdict.** 0.2.0 documented BMJ as a Cloudflare "WAF dead end" clearable
+  neither headless nor headful. That was a headless-only artifact: a headful navigation passes.
+  BMJ is now a working route, and the README reframes the WAF section as a cautionary tale.
+- `_classify` recognises the CF WAF interstitial ("Attention Required") and an unregistered
+  proxy subdomain ("Host does not match" / "Oh noes!") as distinct terminal states.
+
+### Notes
+- Documented genuine dead ends (no route to add): JOSPT — no online entitlement; Thieme / JCO /
+  Liebert — a library-side proxy misconfiguration (unregistered subdomain), not a route bug.
+
 ## [0.2.0] — 2026-07-14
 
 ### Added

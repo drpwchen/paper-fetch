@@ -161,6 +161,29 @@ def _pmcid_render_url(doi):
     return None
 
 
+def _semantic_scholar_pdf(doi):
+    """Semantic Scholar Graph API 的 openAccessPdf 兜底。
+
+    ==為什麼加（2026-07-14）==：Unpaywall 會漏 index 一部分 OA（尤其 preprint server 版本、
+    以及某些出版社的 hybrid OA）；S2 的 openAccessPdf 是另一個獨立的 OA 索引，兩者互補。
+    無 API key 也能用（有 rate limit，偶爾 429 → 靜默略過，不影響其他候選）。查無回 None。"""
+    try:
+        r = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}",
+                         params={"fields": "openAccessPdf"}, timeout=20,
+                         headers={"User-Agent": UA})
+        if r.status_code == 200:
+            oa = (r.json() or {}).get("openAccessPdf") or {}
+            url = oa.get("url")
+            if url:
+                print(f"  Semantic Scholar openAccessPdf: {url}")
+                return url
+        elif r.status_code != 404:
+            print(f"  Semantic Scholar: HTTP {r.status_code}（略過）")
+    except Exception as e:
+        print(f"  Semantic Scholar 查詢略過: {e}")
+    return None
+
+
 def _local_oa_url(doi):
     """paper-radar 本地 db 的 oa_pdf_url 兜底（唯讀，選用）。未設定/查不到/出錯回 None。"""
     if not PAPER_RADAR_DB or not PAPER_RADAR_DB.exists():
@@ -224,6 +247,13 @@ def route_unpaywall(doi):
 
     # DOI→PMCID 直查兜底（author manuscript 在 PMC 但 Unpaywall 漏列/只給 landing）
     add_pdf(_pmcid_render_url(doi))
+
+    # Semantic Scholar openAccessPdf 兜底（獨立於 Unpaywall 的 OA 索引，互補）
+    s2 = _semantic_scholar_pdf(doi)
+    if s2:
+        add_pdf(s2)
+        add_pdf(_pmc_render_url(s2))
+        add_landing(s2)
 
     # 本地 db 兜底（Unpaywall 未 index 或未給 PDF 時）
     local = _local_oa_url(doi)

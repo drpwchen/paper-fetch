@@ -141,16 +141,18 @@ PERSIST_COOKIES = {
 # proxy suffix that gets appended is institution-specific (from config.yaml). This map is
 # the reusable, valuable part — extend it as you verify more publishers.
 PROVIDER_ROUTES = {
-    "10.1002": ("onlinelibrary.wiley.com", "/doi/pdfdirect/{doi}?download=true"),   # Wiley
+    "10.1002": ("onlinelibrary.wiley.com", "/doi/pdfdirect/{doi}?download=true"),   # Wiley (incl. Cochrane 10.1002/14651858)
     "10.1111": ("onlinelibrary.wiley.com", "/doi/pdfdirect/{doi}?download=true"),   # Wiley
     "10.1007": ("link.springer.com", "/content/pdf/{doi}.pdf"),                     # Springer
     "10.1186": ("link.springer.com", "/content/pdf/{doi}.pdf"),                     # BMC (per-journal host; often 404)
     "10.1056": ("www.nejm.org", "/doi/pdf/{doi}"),                                  # NEJM ✅ verified
     "10.1177": ("journals.sagepub.com", "/doi/pdf/{doi}?download=true"),            # Sage ✅ verified
     "10.1080": ("www.tandfonline.com", "/doi/pdf/{doi}?download=true"),             # Taylor & Francis ✅ verified
-    # BMJ (10.1136) deliberately absent: the proxied subdomain sits behind a Cloudflare WAF
-    # block ("Attention Required!") that neither headless nor headful patchright clears.
-    # 10.1001 JAMA → _CITATION_META_PREFIXES + _citation_meta_pdf ✅ verified.
+    "10.2214": ("www.ajronline.org", "/doi/pdf/{doi}?download=true"),               # AJR (Atypon) ✅ verified
+    "10.1148": ("pubs.rsna.org", "/doi/pdf/{doi}?download=true"),                   # Radiology / RSNA ✅ verified
+    "10.1142": ("www.worldscientific.com", "/doi/pdf/{doi}?download=true"),         # World Scientific ✅ verified
+    # 10.1001 JAMA / 10.1093 OUP / 10.1542 Pediatrics / … → _CITATION_META_PREFIXES.
+    # 10.1136 BMJ / 10.3174 AJNR / 10.2967 JNM → _HEADFUL_META_PREFIXES (see below).
     # 10.1016 Elsevier → paper_fetch.py TDM (API, no proxy) handles it first.
     # 10.1097/10.1161/10.1213 (LWW/Ovid) → _LWW_PREFIXES + _lww_ovid_pdf (see stub).
 }
@@ -158,8 +160,33 @@ PROVIDER_ROUTES = {
 _LWW_PREFIXES = {"10.1097", "10.1161", "10.1213"}   # LWW/Ovid journals.lww.com
 
 # Publishers with no DOI→PDF template that DO expose `citation_pdf_url` on the article page
-# → handled generically by _citation_meta_pdf (headless). 10.1001 = JAMA Network ✅ verified.
-_CITATION_META_PREFIXES = {"10.1001", "10.1093"}   # JAMA ✅, Oxford ✅ (both verified)
+# → handled generically by _citation_meta_pdf. Headless is enough for these.
+_CITATION_META_PREFIXES = {
+    "10.1001",   # JAMA Network ✅
+    "10.1093",   # Oxford (OUP) ✅
+    "10.1542",   # Pediatrics ✅
+    "10.1183",   # European Respiratory Journal ✅
+    "10.3171",   # Journal of Neurosurgery ✅
+    "10.1038",   # Nature (Eye / Nat Rev …) ✅
+}
+
+# Same citation_pdf_url route, but the resolver step must run as a REAL headful navigation
+# because the site fronts it with a Cloudflare challenge that blocks headless (and any
+# request.get, even from a headful context). ==This is the key correction to the earlier
+# "BMJ is a WAF dead end" verdict: the WAF only blocks headless; a headful page.goto passes
+# on the first try.== Value maps prefix → optional resolver host: None uses the generic
+# doi-org resolver; a host string uses that site's own `/lookup/doi/{doi}` (Highwire sites
+# like AJNR/JNM send the doi-org resolver into an infinite redirect loop).
+_HEADFUL_META_PREFIXES = {
+    "10.1136": None,              # BMJ ✅ (Heart 2.3 MB / 8 pp verified via headful nav)
+    "10.3174": "www.ajnr.org",   # AJNR ✅
+    "10.2967": "jnm.snmjournals.org",  # J Nucl Med ✅
+}
+
+# Genuinely unavailable — documented so you don't burn time re-probing:
+#   10.2519 JOSPT   — no online entitlement here (the full-text page is an abstract + paywall).
+#   10.1055 Thieme / 10.1200 JCO / 10.1089 Liebert — the *proxy* is misconfigured for these
+#     (unregistered subdomain: "Host does not match" / "Oh noes!"). A library-side fix, not a route.
 
 
 # --- DPAPI (pure python, secret.ps1-compatible: CurrentUser, no entropy) ---
@@ -581,29 +608,49 @@ def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> bool:
     return False
 
 
-def _citation_meta_pdf(page, doi: str, out: Path) -> bool:
-    """Generic multi-step route: proxy DOI resolver → article HTML → `citation_pdf_url`
-    meta tag → PDF fetched with `Referer: <article>`.
+def _citation_meta_pdf(page, doi: str, out: Path, nav: bool = False,
+                       host: str | None = None) -> bool:
+    """Generic multi-step route: resolver → article HTML → `citation_pdf_url` meta tag →
+    PDF fetched with `Referer: <article>`.
 
     Many publishers that have no DOI→PDF *template* still advertise the exact PDF URL in a
     `<meta name="citation_pdf_url">` tag on the article page (Google Scholar relies on it).
     That's a whole class of "hard" publishers solved without any reverse-engineering:
     resolve, read the meta, fetch with the article as Referer.
 
-    Fully headless — unlike the LWW/Ovid flow, no interstitial has to be cleared. Verified
-    on JAMA Network (10.1001). Add a prefix to `_CITATION_META_PREFIXES` once you've
-    confirmed the publisher's PDF endpoint really returns bytes (some return a reader HTML
-    even when the meta is present — that means no entitlement, not a broken route).
+    `nav=False` (JAMA/OUP/…): fully headless — no interstitial to clear.
+    `nav=True` (BMJ/AJNR/JNM): the resolver step runs as a REAL headful `page.goto`, because
+      the site's Cloudflare challenge blocks headless (and any request.get, even from a
+      headful context). ==The article that fixed BMJ: a headful navigation clears the WAF
+      that headless never could — so "WAF dead end" was a headless-only artifact.==
+    `host=None` uses the generic doi-org resolver; a host string uses that site's own
+      `/lookup/doi/{doi}` (Highwire sites loop forever on the doi-org resolver).
+    The PDF step is always request.get + Referer (same context, not re-blocked).
+
+    Add a prefix to `_CITATION_META_PREFIXES` (or `_HEADFUL_META_PREFIXES`) once you've
+    confirmed the publisher's PDF endpoint really returns bytes — some return a reader HTML
+    even when the meta is present, which means no entitlement, not a broken route.
     """
     prefix = doi.split("/")[0]
     _throttle()
-    resolver = f"https://doi-org.{PROXY_SUFFIX}/{doi}"
+    resolver = (f"https://{_proxy_host(host)}/lookup/doi/{doi}" if host
+                else f"https://doi-org.{PROXY_SUFFIX}/{doi}")
     try:
-        r = page.request.get(resolver, timeout=NAV_TIMEOUT_MS)
-        body = r.body()
+        if nav:
+            r = page.goto(resolver, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            body = page.content().encode("utf-8", "ignore")
+        else:
+            r = page.request.get(resolver, timeout=NAV_TIMEOUT_MS)
+            body = r.body()
     except Exception as e:
         _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
               "status": "request_error", "step": "doi_resolve", "note": repr(e)[:100]})
+        return False
+    if b"attention required" in body[:3000].lower() or b"just a moment" in body[:3000].lower():
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
+              "status": "cf_block", "step": "doi_resolve", "nav": nav})
+        print(f"[meta] Cloudflare blocked the resolver (nav={nav}); "
+              f"if nav=False, try nav=True", file=sys.stderr)
         return False
     html = body.decode("utf-8", "ignore")
     m = re.search(r'citation_pdf_url"\s+content="([^"]+)"', html)
@@ -672,7 +719,9 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
     login() and (for LWW) _lww_ovid_pdf() implemented for your institution."""
     prefix = doi.split("/")[0]
     is_lww = prefix in _LWW_PREFIXES
-    ctx = _new_context(pw, headless=not is_lww)
+    is_headful_meta = prefix in _HEADFUL_META_PREFIXES
+    # LWW's "please wait" interstitial and the headful-meta CF challenge both need a window.
+    ctx = _new_context(pw, headless=not (is_lww or is_headful_meta))
     restore_session(ctx)
     page = ctx.new_page()
     try:
@@ -688,11 +737,13 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
                 return True
             print(f"[fetch] no LWW route for {doi}.{_sfx_hint(doi)}", file=sys.stderr)
             return False
-        if prefix in _CITATION_META_PREFIXES:
-            if _citation_meta_pdf(page, doi, out):
+        if prefix in _CITATION_META_PREFIXES or is_headful_meta:
+            nav = is_headful_meta
+            host = _HEADFUL_META_PREFIXES.get(prefix)
+            if _citation_meta_pdf(page, doi, out, nav=nav, host=host):
                 return True
             print("[fetch] meta route failed; fresh login + retry once", file=sys.stderr)
-            if login(page) and _citation_meta_pdf(page, doi, out):
+            if login(page) and _citation_meta_pdf(page, doi, out, nav=nav, host=host):
                 return True
             print(f"[fetch] no meta route for {doi}.{_sfx_hint(doi)}", file=sys.stderr)
             return False

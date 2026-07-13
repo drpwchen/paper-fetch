@@ -22,8 +22,8 @@ The whole design is: **try the cheapest, most-permitted route first, fall throug
 
 ```
 DOI
- ├─ 1. Open Access ─────── Unpaywall → every oa_location, PMC→Europe PMC render,
- │                          landing-page citation_pdf_url meta (covers repositories)
+ ├─ 1. Open Access ─────── Unpaywall + Semantic Scholar openAccessPdf → every oa_location,
+ │                          PMC→Europe PMC render, landing-page citation_pdf_url (repositories)
  ├─ 2. Publisher TDM API ─ Elsevier / Wiley / Springer official text-mining endpoints
  │                          (you register for your own key; entirely sanctioned)
  ├─ 3. Institutional proxy your library's off-campus remote-auth + EZproxy/NetScaler proxy
@@ -69,24 +69,35 @@ fine. So treat a miss as *unknown*, warn, and try the proxy anyway.
 
 ## Publisher routes verified working
 
-| DOI prefix | Publisher | Route |
+There are three route shapes. Pick by what the publisher exposes:
+
+| Shape | How it works | DOI prefixes |
 |---|---|---|
-| `10.1016` | Elsevier | TDM API (no proxy) |
-| `10.1002` / `10.1111` | Wiley | TDM API, or proxy `pdfdirect` template |
-| `10.1007` / `10.1186` | Springer / BMC | OA direct, or proxy template |
-| `10.1097` / `10.1161` / `10.1213` | LWW / Ovid | multi-step signed-URL flow (stub here; fully documented in the docstring) |
-| `10.1056` | NEJM | proxy template |
-| `10.1001` | JAMA | generic `citation_pdf_url` route |
-| `10.1093` | Oxford | generic `citation_pdf_url` route |
-| `10.1177` | Sage | proxy template |
-| `10.1080` | Taylor & Francis | proxy template |
-| `10.1136` | BMJ | ❌ **no route** — the proxied subdomain sits behind a Cloudflare **WAF block**, which a stealth browser clears neither headless nor headful. A genuine dead end, unlike the three above. |
+| **template** (`PROVIDER_ROUTES`) | build the PDF URL from a host + path template | `10.1002`/`10.1111` Wiley · `10.1007`/`10.1186` Springer/BMC · `10.1056` NEJM · `10.1177` Sage · `10.1080` T&F · `10.2214` AJR · `10.1148` Radiology/RSNA · `10.1142` World Scientific |
+| **citation-meta** (`_CITATION_META_PREFIXES`) | resolver → article HTML's `<meta name="citation_pdf_url">` → fetch with Referer. Headless. | `10.1001` JAMA · `10.1093` Oxford · `10.1542` Pediatrics · `10.1183` ERJ · `10.3171` J Neurosurg · `10.1038` Nature |
+| **citation-meta + headful nav** (`_HEADFUL_META_PREFIXES`) | same, but the resolver runs as a real headful navigation to clear a Cloudflare challenge | `10.1136` BMJ · `10.3174` AJNR · `10.2967` J Nucl Med |
+| **signed-URL** (`_LWW_PREFIXES`) | multi-step walk to a signed PDF URL (stub here; fully documented in the docstring) | `10.1097`/`10.1161`/`10.1213` LWW/Ovid |
+
+`10.1016` Elsevier goes through the TDM API in `paper_fetch.py`, never the proxy.
+
+> **BMJ is the cautionary tale.** An earlier version listed BMJ as a Cloudflare "WAF dead end"
+> that no stealth browser could clear. That was wrong: the WAF only blocks *headless* requests
+> (and `request.get`, even from a headful context). A real **headful navigation passes on the
+> first try** — that's the whole `_HEADFUL_META_PREFIXES` variant. If a citation-meta route
+> comes back `cf_block`, switch it to headful nav before concluding anything. (Highwire sites
+> like AJNR/JNM also loop on the generic `doi-org` resolver → give them an explicit `host` so
+> the route uses that site's own `/lookup/doi/`.)
 
 The **`citation_pdf_url` route** is the one to reach for first with a new publisher: many sites
 with no DOI→PDF template still advertise the exact PDF URL in a `<meta name="citation_pdf_url">`
 tag on the article page (it's what Google Scholar indexes). Resolve the DOI through the proxy,
-read the meta, fetch it with the article as `Referer`. No reverse engineering needed. Opt a
-publisher in via `_CITATION_META_PREFIXES` once you've confirmed its PDF endpoint returns bytes.
+read the meta, fetch it with the article as `Referer`. No reverse engineering needed.
+
+**A "broken route" is almost always "no entitlement to this article."** An article your library
+doesn't subscribe to (or whose year is outside the coverage) returns reader HTML or a 403 from
+the PDF endpoint — indistinguishable from a broken template. Sage, T&F, Oxford *and BMJ* were
+each wrongly declared routeless on this basis. Verify entitlement (journal + coverage year)
+against your library's holdings **before** concluding a route is broken.
 
 ## What's public here vs. what you supply
 
