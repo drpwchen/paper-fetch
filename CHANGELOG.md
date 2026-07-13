@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-07-14
 
 ### Added
 - **Generic `citation_pdf_url` route** (`_citation_meta_pdf`) — a whole class of publishers
@@ -87,5 +87,6 @@ inherently specific to your own library and must be implemented against it.
   ahead-of-print articles routinely report OA while offering no `url_for_pdf`. Fall through
   to the institutional route instead of concluding the paper is unavailable.
 
-[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/drpwchen/paper-fetch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/drpwchen/paper-fetch/releases/tag/v0.1.0
