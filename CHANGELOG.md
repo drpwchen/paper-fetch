@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-07-14
+
+### Changed
+- **README restructured**: features first (route ladder → comparison → entitlement trap →
+  verified routes), install/usage below; three reference sections moved to `docs/`
+  (`publisher-tdm-apis.md`, `library-setup.md`, `operations.md`). Sci-Hub positioning toned
+  down to a single factual sentence; dedicated badge and manifesto paragraph removed.
+
 ## [0.4.0] — 2026-07-14
 
 ### Added
@@ -142,7 +150,8 @@ inherently specific to your own library and must be implemented against it.
   ahead-of-print articles routinely report OA while offering no `url_for_pdf`. Fall through
   to the institutional route instead of concluding the paper is unavailable.
 
-[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/drpwchen/paper-fetch/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/drpwchen/paper-fetch/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/drpwchen/paper-fetch/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/drpwchen/paper-fetch/compare/v0.2.0...v0.3.0

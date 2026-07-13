@@ -2,19 +2,13 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
-![Sci-Hub: not in the architecture](https://img.shields.io/badge/Sci--Hub-not%20in%20the%20architecture-red)
 ![Publisher routes verified](https://img.shields.io/badge/publisher%20routes-20%2B%20verified-brightgreen)
 
 Give it a DOI; it walks a **route ladder** to get the full-text PDF the cheapest, most
 legitimate way first — open access, then official publisher text-mining (TDM) APIs, then
 your own institutional library proxy, and finally it just prints your library's resolver
-link so you can finish by hand.
-
-**There is no Sci-Hub route in this architecture — not disabled, not opt-in: absent.**
-Most tools in this space keep piracy as a "last resort" fallback. This one is built on the
-opposite bet: with OA indexes + sanctioned TDM APIs + the subscription access you already
-pay for, a legitimate ladder covers nearly everything — and the gap that remains is a
-*library entitlement problem* you can see and fix, not a reason to route around the law.
+link so you can finish by hand. Every route is one you're already allowed to use; there is
+no Sci-Hub fallback here.
 
 ```bash
 # 30 seconds to first PDF (OA route needs zero keys — just your email in config.yaml)
@@ -62,6 +56,26 @@ Three design rules worth stealing:
   DOI returned a full-text target on one call and none minutes later).
 - **Before blaming a route, check the article's entitlement.** See the trap below — it is the
   single most expensive mistake in this problem space.
+
+## How this compares to other paper fetchers
+
+Plenty of tools turn a DOI into a PDF. They differ on two axes: *where the PDFs come from*
+and *what happens when a route fails*.
+
+| Capability | OA-only clients (unpywall, …) | Sci-Hub-based (PyPaperBot, scidownl, …) | Multi-source fetchers | **paper-fetch** |
+|---|---|---|---|---|
+| Open-access ladder (Unpaywall + S2 + PMC/Europe PMC + `citation_pdf_url`) | partial (usually one index) | — | ✅ | ✅ two independent OA indexes + PMCID direct-conversion |
+| Official publisher TDM APIs (your own keys) | — | — | rare | ✅ Elsevier · Wiley · Springer |
+| Institutional proxy layer (your own login, persistent session) | — | — | IP/cookie passthrough at best | ✅ full remote-auth walk, session survives reboots |
+| Per-publisher route shapes (URL template / `citation_pdf_url` / headful CF nav / multi-step signed-URL) | — | — | generic stealth browser | ✅ 20+ verified, named, documented |
+| **Entitlement ground truth** (your library's A–Z holdings → local SQLite, checked *before* blaming a route) | — | — | — | ✅ unique, as far as we know |
+| Route health from access logs (`stats`, per-route success history) | — | — | — | ✅ |
+| `%PDF` magic-byte validation | rare | rare | some do | ✅ |
+| Agent-native output (`--json` envelope, typed exit codes) | — | — | some do | ✅ |
+
+The two rows nothing else has — entitlement ground truth and log-driven route health — exist
+because they answer the question every other tool leaves you guessing on: **"is this route
+broken, or do I just not have access to this article?"** (See the entitlement trap below.)
 
 ## ⚠ The entitlement trap (read this before you "fix" a publisher route)
 
@@ -122,27 +136,6 @@ the PDF endpoint — indistinguishable from a broken template. Sage, T&F, Oxford
 each wrongly declared routeless on this basis. Verify entitlement (journal + coverage year)
 against your library's holdings **before** concluding a route is broken.
 
-## How this compares to other paper fetchers
-
-Plenty of tools turn a DOI into a PDF. They differ on two axes: *where the PDFs come from*
-and *what happens when a route fails*.
-
-| Capability | OA-only clients (unpywall, …) | Sci-Hub-based (PyPaperBot, scidownl, …) | Multi-source w/ piracy fallback | **paper-fetch** |
-|---|---|---|---|---|
-| Open-access ladder (Unpaywall + S2 + PMC/Europe PMC + `citation_pdf_url`) | partial (usually one index) | — | ✅ | ✅ two independent OA indexes + PMCID direct-conversion |
-| Official publisher TDM APIs (your own keys) | — | — | rare | ✅ Elsevier · Wiley · Springer |
-| Institutional proxy layer (your own login, persistent session) | — | — | IP/cookie passthrough at best | ✅ full remote-auth walk, session survives reboots |
-| Per-publisher route shapes (URL template / `citation_pdf_url` / headful CF nav / multi-step signed-URL) | — | — | generic stealth browser | ✅ 20+ verified, named, documented |
-| **Entitlement ground truth** (your library's A–Z holdings → local SQLite, checked *before* blaming a route) | — | — | — | ✅ unique, as far as we know |
-| Route health from access logs (`stats`, per-route success history) | — | — | — | ✅ |
-| `%PDF` magic-byte validation | rare | rare | some do | ✅ |
-| Agent-native output (`--json` envelope, typed exit codes) | — | — | some do | ✅ |
-| Sci-Hub | — | the whole product | final fallback, on by default | **absent by design** |
-
-The two rows nothing else has — entitlement ground truth and log-driven route health — exist
-because they answer the question every other tool leaves you guessing on: **"is this route
-broken, or do I just not have access to this article?"** (See the entitlement trap above.)
-
 ## What's public here vs. what you supply
 
 | Layer | This repo | You supply |
@@ -157,55 +150,15 @@ two-phase orchestration) is all here and the technique is fully documented in th
 docstrings — but `login()` and the LWW/Ovid multi-step flow are left for you to implement
 against your own institution, because those are the parts that are specific to one library.
 
-## Publisher full-text APIs (all public, worth a bookmark)
-
-These are the sanctioned routes. Register for your own credentials:
-
-| Publisher | Route | How to get access |
-|---|---|---|
-| **Unpaywall** | `api.unpaywall.org/v2/{doi}?email=you@x` | Free. Just pass your email. OA only. |
-| **Elsevier TDM** | `api.elsevier.com/content/article/doi/{doi}` with `Accept: application/pdf` — do **not** add `view=FULL`; it's unnecessary for PDF and gets rejected (`400 INVALID_INPUT`) for a subset of articles, masquerading as a coverage gap | Register at [dev.elsevier.com](https://dev.elsevier.com); header `X-ELS-APIKey`. Off-campus paywalled content also needs an `X-ELS-Insttoken` from your library. |
-| **Wiley TDM** | `api.wiley.com/onlinelibrary/tdm/v1/articles/{doi}` | Accept the click-through at [static.wiley.com/tdm](https://static.wiley.com/tdm/); header `Wiley-TDM-Client-Token`. |
-| **Springer** | `api.springernature.com/openaccess/json?q=doi:{doi}` | Register at [dev.springernature.com](https://dev.springernature.com). OA direct (`link.springer.com/content/pdf/{doi}.pdf`) often works with no key. |
-| **Crossref / Europe PMC** | metadata + OA full text | No key. Great for resolving and for PMC-hosted OA. |
-
-## Finding your own library's endpoints (the institutional layer)
-
-The proxy layer needs three values in `config.yaml`. None of them are secret — they're your
-library's public infrastructure. Where to find them:
-
-- **`sfx_base`** (link resolver): your library portal → *e-resources* / *databases* → *link
-  resolver* / *SFX* / *Find it @ ...*. It's an OpenURL endpoint; the DOI goes in `id=doi:`.
-- **`remote_auth_base`** (off-campus login gate): the page you log into to read journals
-  from home. Often a Citrix NetScaler / *remote reader authentication* / *remote access* portal.
-- **`proxy_suffix`** (the rewrite host): notice how a publisher URL changes when you open it
-  through the proxy — `onlinelibrary.wiley.com` becomes something like
-  `onlinelibrary-wiley-com.proxy.yourlib.edu:port`. The part after the dash-rewritten host
-  is your `proxy_suffix`. **When in doubt, ask your librarian** — they'll know the EZproxy /
-  proxy hostname.
-
-If your library uses **EZproxy** (very common), the rewrite is usually `dots→dashes` +
-a fixed proxy suffix, exactly the pattern `_proxy_host()` implements.
-
-### Which off-campus family is your library? (adapt `login()` accordingly)
-
-Every library wires off-campus access as one of four families. Identify yours first — it
-decides how much of `login()` you need to write:
-
-| Family | How you recognize it | What to implement |
-|---|---|---|
-| **EZproxy** | publisher hosts get rewritten to `host-with-dashes.proxy.yourlib.edu` | mostly nothing beyond `proxy_suffix` + a form login — the closest fit to this codebase |
-| **OpenAthens / Shibboleth** | login bounces through `login.openathens.net` or your university SSO (SAML) | drive the SSO redirect chain once in the headful browser; the persistent profile then keeps the session |
-| **VPN** | you install a VPN client and publishers just see campus IP | *no proxy layer needed at all* — run only the OA/TDM half, publishers serve PDFs directly |
-| **Custom portal** (NetScaler, homegrown) | a bespoke "remote reader authentication" page | write the login walk against that portal — this repo's stub documents one worked example |
-
-In all four cases the *rest* of the machinery (route shapes, entitlement table, access log,
-throttle, response classifier) is family-agnostic — `login()` is the only part that is yours.
+**Adapting to YOUR library:** off-campus access comes in four families (EZproxy,
+OpenAthens/Shibboleth, VPN, custom portal) and only `login()` differs between them —
+[docs/library-setup.md](docs/library-setup.md) walks you through identifying your family
+and finding your endpoints.
 
 ## Install
 
 ```bash
-git clone <this-repo> && cd paper-fetch
+git clone https://github.com/drpwchen/paper-fetch && cd paper-fetch
 pip install -r requirements.txt
 python -m patchright install chromium      # only needed for the proxy layer
 cp config.example.yaml config.yaml         # fill in your email + your library's endpoints
@@ -223,6 +176,9 @@ powershell -File ~/.secrets/secret.ps1 set LIB_PASS
 
 (Any secret store works — the code shells out to `~/.secrets/secret.ps1 get <NAME>`; swap in
 your own if you're not on Windows DPAPI.)
+
+How to register for the publisher TDM APIs (Elsevier / Wiley / Springer / Unpaywall) →
+[docs/publisher-tdm-apis.md](docs/publisher-tdm-apis.md).
 
 ## Use
 
@@ -262,32 +218,14 @@ your library's SFX link for a manual finish. `sha256` lets batch callers dedupe.
 ==Codes `4` and `5` mean "try again, one at a time" — never record them as "no full text."==
 Conflating them is the single easiest way to wrongly conclude a paper is unobtainable.
 
-### Calling this from parallel workers / LLM agents
+### ⚠ Before you batch or parallelize
 
-**Don't.** `library_session.py` drives one exclusive browser profile and is serial by design;
-a cross-process lock makes concurrent callers queue and then fail with exit `4`. If you are
-batch-processing papers (e.g. an agent per paper), **fetch the PDFs in a serial pre-pass
-first**, then hand the resulting file paths to the workers. Letting N agents each race for
-the browser deadlocks them, and each will independently retry — burning time and, if they're
-LLM agents, tokens.
-
-Likewise, **never wrap this script in `timeout`**: that kills the parent and orphans the
-chromium child (leaked RAM). The built-in watchdog already bounds every run and tree-kills
-its own browser.
-
-## ⚠ Rate limits & your institution's IP — read this
-
-The proxy layer defaults to a **15-second courtesy delay** and is **strictly serial**. That
-is not a performance limit — it's protection.
-
-When a publisher detects *systematic downloading*, it blocks the **entire institution's IP
-range**. Everyone at your institution loses access, not just you. So:
-
-- `rate.min_interval_s` can be lowered or set to `0`, but `0` prints a warning. Only do that
-  for a handful of papers.
-- Run `stats` regularly to watch for the first `cf_block` / `rate_limited`.
-- The true daily ceiling is unknown and publisher-specific — the tool logs every request so
-  you can learn yours empirically. If you hit a block, note the request count it happened at.
+The proxy layer is **strictly serial with a 15 s courtesy delay** — publishers block an
+entire institution's IP range when they detect systematic downloading, and the browser
+profile is an exclusive resource (parallel callers deadlock, then wrongly record papers as
+missing). Rate-limit reasoning, batch patterns, and how to call this from LLM agents →
+[docs/operations.md](docs/operations.md). Never wrap the script in `timeout` — it has its
+own watchdog.
 
 ## Red lines
 
