@@ -31,11 +31,62 @@ DOI
  └─ 4. Resolver link ────── print your library's SFX/OpenURL link → finish manually
 ```
 
-Two design rules worth stealing:
+Three design rules worth stealing:
 - **Validate `%PDF` magic bytes**, never trust `Content-Type`. Paywalls and Cloudflare love
   to return `200 text/html` that *looks* like a PDF response but isn't.
 - **Don't trust the resolver's "subscribed / not subscribed" flag** — attempt the proxy
-  anyway; coverage metadata is often stale.
+  anyway; coverage metadata is often stale, and link resolvers are flaky besides (the same
+  DOI returned a full-text target on one call and none minutes later).
+- **Before blaming a route, check the article's entitlement.** See the trap below — it is the
+  single most expensive mistake in this problem space.
+
+## ⚠ The entitlement trap (read this before you "fix" a publisher route)
+
+An article your library **doesn't hold** makes a *working* route return reader HTML or a 403 —
+**a signal indistinguishable from a broken template.**
+
+Three publishers in this project (Sage, Taylor & Francis, Oxford) were each written off as
+"returns HTML, needs reverse engineering". All three worked the moment they were retested with
+an article the library actually holds. Weeks of would-be reverse-engineering, avoided by
+picking a better test article.
+
+Two wrinkles that make this genuinely hard to see:
+- **Coverage is per-journal AND per-year.** A library may hold a journal for a *single 1990s
+  issue*, or exclude ahead-of-print. "We subscribe to that journal" is not enough — check the
+  year of the article you're testing with.
+- **Link resolvers (SFX/360/OpenURL) are unreliable oracles.** Same DOI, minutes apart,
+  different answers. Don't build an entitlement check on one.
+
+**What to use instead:** your library's **A–Z e-journal list** (journal → platform → coverage
+years) is stable, complete, and usually a plain public page. Scrape it once into a local table,
+then answer per DOI: CrossRef gives you ISSN + journal + year, the table gives you platform and
+coverage. That is your ground truth — and when a route fails on an article that IS covered, only
+*then* do you have a real bug.
+
+One caveat worth encoding: **"not in the list" ≠ "no access."** JAMA isn't in this library's
+e-journal list at all (it lives under a separate database entry) yet the proxy serves its PDFs
+fine. So treat a miss as *unknown*, warn, and try the proxy anyway.
+
+## Publisher routes verified working
+
+| DOI prefix | Publisher | Route |
+|---|---|---|
+| `10.1016` | Elsevier | TDM API (no proxy) |
+| `10.1002` / `10.1111` | Wiley | TDM API, or proxy `pdfdirect` template |
+| `10.1007` / `10.1186` | Springer / BMC | OA direct, or proxy template |
+| `10.1097` / `10.1161` / `10.1213` | LWW / Ovid | multi-step signed-URL flow (stub here; fully documented in the docstring) |
+| `10.1056` | NEJM | proxy template |
+| `10.1001` | JAMA | generic `citation_pdf_url` route |
+| `10.1093` | Oxford | generic `citation_pdf_url` route |
+| `10.1177` | Sage | proxy template |
+| `10.1080` | Taylor & Francis | proxy template |
+| `10.1136` | BMJ | ❌ **no route** — the proxied subdomain sits behind a Cloudflare **WAF block**, which a stealth browser clears neither headless nor headful. A genuine dead end, unlike the three above. |
+
+The **`citation_pdf_url` route** is the one to reach for first with a new publisher: many sites
+with no DOI→PDF template still advertise the exact PDF URL in a `<meta name="citation_pdf_url">`
+tag on the article page (it's what Google Scholar indexes). Resolve the DOI through the proxy,
+read the meta, fetch it with the article as `Referer`. No reverse engineering needed. Opt a
+publisher in via `_CITATION_META_PREFIXES` once you've confirmed its PDF endpoint returns bytes.
 
 ## What's public here vs. what you supply
 
