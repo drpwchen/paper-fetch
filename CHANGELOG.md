@@ -7,7 +7,25 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Generic `citation_pdf_url` route** (`_citation_meta_pdf`) — a whole class of publishers
+  with no DOI→PDF template still advertise the exact PDF URL in a `<meta name="citation_pdf_url">`
+  tag on the article page (it's what Google Scholar indexes). Resolve the DOI through the
+  proxy, read the meta, fetch it with the article as `Referer`. No reverse-engineering, fully
+  headless. Verified on JAMA Network (`10.1001`); opt a publisher in via `_CITATION_META_PREFIXES`.
+- **DOI→PMCID OA fallback** — asks NCBI's idconv for a PMCID and, if there is one, fetches the
+  Europe PMC `?pdf=render` endpoint. Catches NIH author manuscripts that live in PMC but that
+  Unpaywall either under-indexes or only points at a landing page.
+
+### Changed
+- NEJM (`10.1056`) template verified end-to-end (was shipped as an unverified guess).
+
 ### Documentation
+- ⚠️ **A publisher probe is only as good as your test article's entitlement.** If you probe a
+  publisher with an article your institution doesn't subscribe to, the PDF endpoint hands back
+  a reader/interstitial HTML — which looks exactly like a broken route. Two "unsupported
+  publisher" verdicts in this project were later traced to unsubscribed samples (and one to a
+  bug in the *subscription detector* itself). Confirm entitlement first, then blame the route.
 - Clarified a trap worth knowing before you trust any "no full text" verdict: **one route
   failing does not mean the PDF doesn't exist.** A publisher's own platforms disagree —
   e.g. an ahead-of-print article can be missing from the journal site's PDF viewer while the

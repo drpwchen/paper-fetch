@@ -138,6 +138,29 @@ def _pmc_render_url(url):
     return None
 
 
+def _pmcid_render_url(doi):
+    """DOI→PMCID 直查（NCBI idconv）→ Europe PMC render 端點。
+
+    `_pmc_render_url` 只在候選 URL 字面帶 PMC 時觸發；NIH author manuscript 常在 PMC
+    但 Unpaywall 只給 landing page 或漏索引 → 這裡直接問 idconv 補一條候選。查無回 None。"""
+    try:
+        params = {"ids": doi, "format": "json", "tool": "paper_fetch"}
+        if UNPAYWALL_EMAIL:
+            params["email"] = UNPAYWALL_EMAIL
+        r = requests.get("https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/",
+                         params=params, timeout=20, headers={"User-Agent": UA})
+        if r.status_code != 200:
+            return None
+        for rec in (r.json() or {}).get("records", []):
+            pmcid = rec.get("pmcid")
+            if pmcid:
+                print(f"  idconv: {doi} → {pmcid}")
+                return f"https://europepmc.org/articles/{pmcid.upper()}?pdf=render"
+    except Exception as e:
+        print(f"  idconv 查詢略過: {e}")
+    return None
+
+
 def _local_oa_url(doi):
     """paper-radar 本地 db 的 oa_pdf_url 兜底（唯讀，選用）。未設定/查不到/出錯回 None。"""
     if not PAPER_RADAR_DB or not PAPER_RADAR_DB.exists():
@@ -198,6 +221,9 @@ def route_unpaywall(doi):
                 print(f"  Unpaywall: HTTP {r.status_code}")
         except Exception as e:
             print(f"  Unpaywall 查詢失敗: {e}")
+
+    # DOI→PMCID 直查兜底（author manuscript 在 PMC 但 Unpaywall 漏列/只給 landing）
+    add_pdf(_pmcid_render_url(doi))
 
     # 本地 db 兜底（Unpaywall 未 index 或未給 PDF 時）
     local = _local_oa_url(doi)

@@ -145,15 +145,19 @@ PROVIDER_ROUTES = {
     "10.1111": ("onlinelibrary.wiley.com", "/doi/pdfdirect/{doi}?download=true"),   # Wiley
     "10.1007": ("link.springer.com", "/content/pdf/{doi}.pdf"),                     # Springer
     "10.1186": ("link.springer.com", "/content/pdf/{doi}.pdf"),                     # BMC (per-journal host; often 404)
-    "10.1056": ("www.nejm.org", "/doi/pdf/{doi}"),                                  # NEJM (unverified template)
+    "10.1056": ("www.nejm.org", "/doi/pdf/{doi}"),                                  # NEJM ✅ verified
     "10.1177": ("journals.sagepub.com", "/doi/pdf/{doi}?download=true"),            # Sage (often returns HTML)
     "10.1136": ("www.bmj.com", "/content/{doi}.full.pdf"),                          # BMJ (path may vary)
-    "10.1001": None,                                                                # JAMA — needs articleId scrape (LWW-style)
+    # 10.1001 JAMA → _CITATION_META_PREFIXES + _citation_meta_pdf ✅ verified.
     # 10.1016 Elsevier → paper_fetch.py TDM (API, no proxy) handles it first.
     # 10.1097/10.1161/10.1213 (LWW/Ovid) → _LWW_PREFIXES + _lww_ovid_pdf (see stub).
 }
 
 _LWW_PREFIXES = {"10.1097", "10.1161", "10.1213"}   # LWW/Ovid journals.lww.com
+
+# Publishers with no DOI→PDF template that DO expose `citation_pdf_url` on the article page
+# → handled generically by _citation_meta_pdf (headless). 10.1001 = JAMA Network ✅ verified.
+_CITATION_META_PREFIXES = {"10.1001"}
 
 
 # --- DPAPI (pure python, secret.ps1-compatible: CurrentUser, no entropy) ---
@@ -575,6 +579,60 @@ def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> bool:
     return False
 
 
+def _citation_meta_pdf(page, doi: str, out: Path) -> bool:
+    """Generic multi-step route: proxy DOI resolver → article HTML → `citation_pdf_url`
+    meta tag → PDF fetched with `Referer: <article>`.
+
+    Many publishers that have no DOI→PDF *template* still advertise the exact PDF URL in a
+    `<meta name="citation_pdf_url">` tag on the article page (Google Scholar relies on it).
+    That's a whole class of "hard" publishers solved without any reverse-engineering:
+    resolve, read the meta, fetch with the article as Referer.
+
+    Fully headless — unlike the LWW/Ovid flow, no interstitial has to be cleared. Verified
+    on JAMA Network (10.1001). Add a prefix to `_CITATION_META_PREFIXES` once you've
+    confirmed the publisher's PDF endpoint really returns bytes (some return a reader HTML
+    even when the meta is present — that means no entitlement, not a broken route).
+    """
+    prefix = doi.split("/")[0]
+    _throttle()
+    resolver = f"https://doi-org.{PROXY_SUFFIX}/{doi}"
+    try:
+        r = page.request.get(resolver, timeout=NAV_TIMEOUT_MS)
+        body = r.body()
+    except Exception as e:
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
+              "status": "request_error", "step": "doi_resolve", "note": repr(e)[:100]})
+        return False
+    html = body.decode("utf-8", "ignore")
+    m = re.search(r'citation_pdf_url"\s+content="([^"]+)"', html)
+    if not m:
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
+              "status": "no_pdf_meta", "http": r.status, "bytes": len(body)})
+        print(f"[meta] no citation_pdf_url on {r.url[:100]}", file=sys.stderr)
+        return False
+    pdf_url = m.group(1)
+    host = urlsplit(pdf_url).netloc
+    if PROXY_SUFFIX.split(":")[0] not in host:      # meta gave the public host → rewrite
+        pdf_url = pdf_url.replace(host, _proxy_host(host), 1)
+    try:
+        rp = page.request.get(pdf_url, headers={"referer": r.url}, timeout=NAV_TIMEOUT_MS)
+        pb = rp.body()
+    except Exception as e:
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
+              "status": "request_error", "step": "pdf", "note": repr(e)[:100]})
+        return False
+    status = _classify(rp, pb)
+    _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta", "status": status,
+          "http": rp.status, "bytes": len(pb)})
+    if status == "pdf":
+        out.write_bytes(pb)
+        print(f"[meta] OK -> {out} ({len(pb)} bytes)", file=sys.stderr)
+        return True
+    _warn_if_blocked(status)
+    print(f"[meta] {status} (http {rp.status}, {len(pb)}B)", file=sys.stderr)
+    return False
+
+
 def _lww_ovid_pdf(page, doi: str, out: Path) -> bool:
     """STUB — one worked example of a multi-step publisher flow (LWW/Ovid, journals.lww.com).
 
@@ -627,6 +685,14 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
             if _lww_ovid_pdf(page, doi, out):
                 return True
             print(f"[fetch] no LWW route for {doi}.{_sfx_hint(doi)}", file=sys.stderr)
+            return False
+        if prefix in _CITATION_META_PREFIXES:
+            if _citation_meta_pdf(page, doi, out):
+                return True
+            print("[fetch] meta route failed; fresh login + retry once", file=sys.stderr)
+            if login(page) and _citation_meta_pdf(page, doi, out):
+                return True
+            print(f"[fetch] no meta route for {doi}.{_sfx_hint(doi)}", file=sys.stderr)
             return False
         if PROVIDER_ROUTES.get(prefix) is None:
             print(f"[fetch] no proxy route for {doi}.{_sfx_hint(doi)}", file=sys.stderr)
