@@ -146,8 +146,10 @@ PROVIDER_ROUTES = {
     "10.1007": ("link.springer.com", "/content/pdf/{doi}.pdf"),                     # Springer
     "10.1186": ("link.springer.com", "/content/pdf/{doi}.pdf"),                     # BMC (per-journal host; often 404)
     "10.1056": ("www.nejm.org", "/doi/pdf/{doi}"),                                  # NEJM ✅ verified
-    "10.1177": ("journals.sagepub.com", "/doi/pdf/{doi}?download=true"),            # Sage (often returns HTML)
-    "10.1136": ("www.bmj.com", "/content/{doi}.full.pdf"),                          # BMJ (path may vary)
+    "10.1177": ("journals.sagepub.com", "/doi/pdf/{doi}?download=true"),            # Sage ✅ verified
+    "10.1080": ("www.tandfonline.com", "/doi/pdf/{doi}?download=true"),             # Taylor & Francis ✅ verified
+    # BMJ (10.1136) deliberately absent: the proxied subdomain sits behind a Cloudflare WAF
+    # block ("Attention Required!") that neither headless nor headful patchright clears.
     # 10.1001 JAMA → _CITATION_META_PREFIXES + _citation_meta_pdf ✅ verified.
     # 10.1016 Elsevier → paper_fetch.py TDM (API, no proxy) handles it first.
     # 10.1097/10.1161/10.1213 (LWW/Ovid) → _LWW_PREFIXES + _lww_ovid_pdf (see stub).
@@ -157,7 +159,7 @@ _LWW_PREFIXES = {"10.1097", "10.1161", "10.1213"}   # LWW/Ovid journals.lww.com
 
 # Publishers with no DOI→PDF template that DO expose `citation_pdf_url` on the article page
 # → handled generically by _citation_meta_pdf (headless). 10.1001 = JAMA Network ✅ verified.
-_CITATION_META_PREFIXES = {"10.1001"}
+_CITATION_META_PREFIXES = {"10.1001", "10.1093"}   # JAMA ✅, Oxford ✅ (both verified)
 
 
 # --- DPAPI (pure python, secret.ps1-compatible: CurrentUser, no entropy) ---

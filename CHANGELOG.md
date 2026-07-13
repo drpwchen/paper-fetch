@@ -19,13 +19,27 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 - NEJM (`10.1056`) template verified end-to-end (was shipped as an unverified guess).
+- **Sage (`10.1177`), Taylor & Francis (`10.1080`), Oxford (`10.1093`) all verified working.**
+  Sage and T&F use the plain path template; Oxford goes through the `citation_pdf_url` route.
+  Every one of these had previously been written off as "returns HTML, needs reverse
+  engineering" — see below.
+- **BMJ (`10.1136`) removed from the route map.** Its proxied subdomain sits behind a
+  Cloudflare **WAF block** ("Attention Required!"), which a stealth browser does not clear
+  headless *or* headful. That is a real dead end, unlike the three above.
 
 ### Documentation
-- ⚠️ **A publisher probe is only as good as your test article's entitlement.** If you probe a
-  publisher with an article your institution doesn't subscribe to, the PDF endpoint hands back
-  a reader/interstitial HTML — which looks exactly like a broken route. Two "unsupported
-  publisher" verdicts in this project were later traced to unsubscribed samples (and one to a
-  bug in the *subscription detector* itself). Confirm entitlement first, then blame the route.
+- ⚠️ **A publisher probe is only as good as your test article's entitlement — this is the
+  single biggest trap in this whole problem space.** If the article isn't covered by your
+  institution's subscription, the publisher's PDF endpoint returns reader/interstitial HTML
+  or a 403 — *indistinguishable from a broken route*. **Three publishers in this project
+  (Sage, Taylor & Francis, Oxford) were each declared "unsupported, needs reverse
+  engineering". All three worked the moment they were retested with an article the library
+  actually holds.** Two further wrinkles that make this hard to see:
+  - Coverage is per-journal AND per-year: a library may hold a journal for *one 1990s issue*,
+    or exclude ahead-of-print. "Subscribed" is not enough — check the article's year.
+  - Link resolvers (SFX/360) are unreliable as an entitlement oracle: the same DOI returned a
+    full-text target on one call and none minutes later. Your library's **A–Z e-journal list**
+    (journal + platform + coverage years) is the stable source of truth; scrape it once.
 - Clarified a trap worth knowing before you trust any "no full text" verdict: **one route
   failing does not mean the PDF doesn't exist.** A publisher's own platforms disagree —
   e.g. an ahead-of-print article can be missing from the journal site's PDF viewer while the
