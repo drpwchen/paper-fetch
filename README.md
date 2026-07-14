@@ -207,7 +207,13 @@ verification smoke test, and the hard lines it must not cross.
   authenticated session; it is not a way around a paywall and not a way to share an account.
 - **Your account, your responsibility.** Use your own credentials and follow your library's
   license terms and each publisher's ToS.
+- **Do not remove the rate limit to bulk-download.** Publishers respond to systematic
+  downloading by blocking the *institution's* whole IP range — your colleagues pay for it.
 - Never commit `config.yaml`, `*.dpapi`, or `access_log.jsonl` (the `.gitignore` blocks them).
+
+Full acceptable-use terms, and what is and isn't your responsibility →
+**[DISCLAIMER.md](DISCLAIMER.md)**. Short version: no warranty, use your own account, follow
+your library's licence and each publisher's ToS, don't redistribute what you download.
 
 MIT licensed. Contributions that add publisher route templates or adapt the proxy layer to
 other library systems are welcome. Notable changes: [CHANGELOG.md](CHANGELOG.md).

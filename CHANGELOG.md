@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-07-14
+
+### Added
+- **`DISCLAIMER.md`** — acceptable use spelled out for people who won't read the Red lines:
+  no warranty (MIT), use your own account, follow your library's licence and each publisher's
+  ToS (systematic/bulk download is prohibited **even for legitimate subscribers**), don't
+  remove the rate limit (it protects the institution's shared IP, not the publisher), respect
+  the TDM API terms you signed for, don't redistribute retrieved PDFs, no affiliation with any
+  publisher or institution. Linked from the README's Red lines.
+
 ## [0.5.0] — 2026-07-14
 
 ### Added
