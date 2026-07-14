@@ -5,6 +5,87 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-07-14
+
+**No more stubs.** Everything platform-generic that the reference implementation had been
+holding back is now in the public edition; what remains yours to supply is genuinely yours
+(your library's endpoints, your account, and — for SSO gates only — your `login()`).
+
+### Added
+- **The full LWW/Ovid signed-URL flow** (`_lww_ovid_pdf`), previously a documented stub:
+  proxy DOI resolver → scrape the article number → `downloadpdf.aspx` viewer → signed
+  `pdfUrl` fetched with the exact Referer chain (viewer, not article — an article Referer
+  gets HTTP 503 and is what makes this route look dead), with retry while the proxy warms
+  the PDF backend.
+- **Ovid OCE fallback** (`_ovid_oce_pdf`) for ahead-of-print articles whose LWW viewer
+  carries no signed `pdfUrl` — the PDF still exists on Ovid's other platform. Includes the
+  pdf.js-viewer trap (match on `content-type: application/pdf`, never on the URL: the
+  viewer's own URL contains the literal string `application-pdf`, and the naive regex saves
+  88 KB of viewer HTML as a "PDF").
+- **Ovid concurrent-licence-seat (E3) discipline**: "License Service Failure (Code: E3)"
+  means a *seat* is occupied, not a rate limit — and it is raised above the proxy, so the
+  response classifier never sees it. One attempt per fetch, `about:blank` immediately after
+  to release the seat, a persisted cooldown (`PAPERFETCH_OVID_COOLDOWN_S`, default 30 min),
+  and a dedicated `license_seat_e3` status so `stats` finally shows it.
+- **Classic-Ovid platform branch**: an LWW licence can live only on the OCE/journals-lww
+  platforms while the same subscribed article shows `/abstract/` on classic `www-ovid` —
+  neither proves "not subscribed". The branch resolves it via the SFX detailed-XML API
+  (`&sfx.response_type=multi_obj_detailed_xml`, a standard ExLibris feature): the LWW
+  `getFullTxt` target 302s to the licensed OCE article, article number included, without
+  costing an Ovid seat (`_sfx_lww_target`).
+- **Generic form login — `login()` is no longer a stub.** `auth:` section in `config.yaml`
+  (family / login path / field selectors / optional numeric-CAPTCHA keys / cookies to
+  persist). `auth.family: form` covers the two most common gate families out of the box —
+  EZproxy and Django/NetScaler-style portals, with offline CAPTCHA OCR (ddddocr) when
+  configured; `auth.family: custom` remains for SSO redirect chains (OpenAthens/Shibboleth).
+- **Per-subdomain proxy-handshake login** (`_login_submit_here`): on proxies that authorize
+  each publisher subdomain separately, the login form must be submitted **on the bounce page
+  itself** (its `?next=` chain completes the handshake) — a re-login at the gate's own page
+  is a silent no-op while the session is still valid, and the subdomain stays unauthorized
+  forever. Wired into the meta, LWW, and Ovid routes.
+- **Unified `ROUTES` dispatch table** — one dict keyed by DOI prefix with
+  `kind: tpl | meta | lww`, replacing `PROVIDER_ROUTES` + three parallel prefix sets.
+  Adding a publisher is now one line. CJASN (`10.2215`, moved to LWW) added.
+- **`routes` CLI command**: per-prefix scorecard from the access log, with
+  subscribed/covered printed next to every failure — the dividing line between "route
+  broken" and "article never entitled" — plus a holdings-gap list (subscribed articles
+  hitting a prefix with no route).
+- **Entitlement pre-check wired into `run_fetch`** (`holdings.py`, shipped in 0.5.0, now
+  actually consulted before the proxy layer): warns when the article's year falls outside
+  coverage ("the proxy will likely return reader HTML — NOT a broken route"), stamps
+  `subscribed`/`covered`/`journal` onto every proxy log record, and honors
+  `PAPERFETCH_SKIP_UNSUB=1` to skip the proxy for unentitled articles.
+- **Route results carry a REASON** (`"pdf" | "auth" | "fail"`) instead of a bool: only an
+  `"auth"` failure triggers the one fresh-login retry — re-running a `"fail"` is useless and
+  on LWW costs a second Ovid seat.
+- **Chromium launch self-heal**: headful launches can intermittently hang for minutes; a
+  launch watchdog (`PAPERFETCH_LAUNCH_TIMEOUT_S`, default 90 s) kills the half-started
+  chromium children (never the driver) and retries once. Plus `[t+…s]` progress marks on
+  stderr so a hang pins down WHICH call blocked.
+- Exception classification (`_classify_exc`): `redirect_loop` (the Highwire doi-org
+  resolver signature — fixable by switching to a host resolver) and `timeout` are now
+  distinguishable from generic `request_error` in the access log.
+- `_classify` recognizes an unregistered proxy subdomain ("Host does not match" and
+  friends) as `proxy_host_unregistered` — a library-side misconfiguration to report, not a
+  route bug to debug.
+
+### Changed
+- **Throttle is now per-paper, not per-request**: the courtesy gap applies between papers;
+  later steps of the same multi-step chain (resolver → viewer → PDF) use a small jitter.
+  The full gap at every step added 30–45 s per paper for nothing.
+- `paper_fetch.py` diagnostics are surfaced (last lines of stdout) when the OA/TDM layer
+  comes back empty, instead of being swallowed.
+- README / AGENTS.md / docs/library-setup.md rewritten around "complete, config-driven"
+  instead of "architecture + stubs"; library-setup gains the `auth:` presets per family and
+  a `persist_cookies` how-to.
+
+### Migration
+- `PROVIDER_ROUTES` / `_CITATION_META_PREFIXES` / `_HEADFUL_META_PREFIXES` / `_LWW_PREFIXES`
+  no longer exist — custom entries move into `ROUTES` (`{"kind": "tpl", "host": …,
+  "path": …}` / `{"kind": "meta", "nav": …, "host": …}` / `{"kind": "lww"}`).
+- If you had implemented `login()` yourself, either translate it into `auth:` selectors
+  (form gates) or keep your code under `auth.family: custom`.
+
 ## [0.5.2] — 2026-07-14
 
 ### Changed
@@ -195,7 +276,11 @@ inherently specific to your own library and must be implemented against it.
   ahead-of-print articles routinely report OA while offering no `url_for_pdf`. Fall through
   to the institutional route instead of concluding the paper is unavailable.
 
-[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/drpwchen/paper-fetch/compare/v0.5.2...v1.0.0
+[0.5.2]: https://github.com/drpwchen/paper-fetch/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/drpwchen/paper-fetch/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/drpwchen/paper-fetch/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/drpwchen/paper-fetch/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/drpwchen/paper-fetch/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/drpwchen/paper-fetch/compare/v0.3.0...v0.3.1

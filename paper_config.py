@@ -16,6 +16,17 @@ _DEFAULTS = {
     "paper_radar_db": "",
     "holdings_db": "",
     "institution": {"sfx_base": "", "remote_auth_base": "", "proxy_suffix": ""},
+    "auth": {
+        "family": "form",
+        "login_path": "/login/",
+        "user_selector": "#id_username",
+        "pass_selector": "#id_password",
+        "submit_selector": "form button[type='submit'], form input[type='submit']",
+        "captcha_selector": "",
+        "captcha_hashkey_selector": "",
+        "captcha_image_path": "",
+        "persist_cookies": {},
+    },
     "rate": {"min_interval_s": 15, "contact": ""},
 }
 

@@ -27,9 +27,11 @@ reading end is `claude-paper-tools`, the discovery end is `paper-radar`.
    python paper_fetch.py 10.1186/s12984-023-01168-x out.pdf   # a real OA article; must yield a PDF
    ```
    If that fails, the problem is config or network, not the library. Fix it here, not later.
-5. Only then the proxy layer: implement `login()` and — if the user's library uses LWW/Ovid —
-   `_lww_ovid_pdf()`. Both are documented stubs; adapt the selectors and request sequence to
-   the user's own library by inspecting it in devtools. Then:
+5. Only then the proxy layer. As of v1.0 all route code (including the full LWW/Ovid flow)
+   ships working — what remains is authentication config: set `auth.family: form` and point
+   the selectors in `config.yaml` at the gate's login form (inspect it in devtools; EZproxy
+   preset in docs/library-setup.md), plus `auth.persist_cookies`. Only SSO gates
+   (OpenAthens/Shibboleth) need a custom `login()` implementation. Then:
    ```bash
    python library_session.py check                 # is the session alive?
    python library_session.py fetch <DOI> out.pdf   # a DOI the library definitely holds

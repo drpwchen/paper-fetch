@@ -64,10 +64,16 @@ and verified against live articles.
 
 | Shape | How it works | DOI prefixes |
 |---|---|---|
-| **template** (`PROVIDER_ROUTES`) | build the PDF URL from a host + path template | `10.1002`/`10.1111` Wiley · `10.1007`/`10.1186` Springer/BMC · `10.1056` NEJM · `10.1177` Sage · `10.1080` T&F · `10.2214` AJR · `10.1148` Radiology/RSNA · `10.1142` World Scientific |
-| **citation-meta** (`_CITATION_META_PREFIXES`) | resolver → article HTML's `<meta name="citation_pdf_url">` → fetch with Referer. Headless. | `10.1001` JAMA · `10.1093` Oxford · `10.1542` Pediatrics · `10.1183` ERJ · `10.3171` J Neurosurg · `10.1038` Nature |
-| **citation-meta + headful nav** (`_HEADFUL_META_PREFIXES`) | same, but the resolver runs as a real headful navigation to clear a Cloudflare challenge | `10.1136` BMJ · `10.3174` AJNR · `10.2967` J Nucl Med |
-| **signed-URL** (`_LWW_PREFIXES`) | multi-step walk to a signed PDF URL (stub here; fully documented in the docstring) | `10.1097`/`10.1161`/`10.1213` LWW/Ovid |
+All four shapes live in one dispatch table — `ROUTES` in `library_session.py`, keyed by DOI
+prefix with a `kind` of `tpl` / `meta` / `lww` — and as of v1.0 every one of them ships
+working code:
+
+| Shape | How it works | DOI prefixes |
+|---|---|---|
+| **template** (`kind: tpl`) | build the PDF URL from a host + path template | `10.1002`/`10.1111` Wiley · `10.1007`/`10.1186` Springer/BMC · `10.1056` NEJM · `10.1177` Sage · `10.1080` T&F · `10.2214` AJR · `10.1148` Radiology/RSNA · `10.1142` World Scientific |
+| **citation-meta** (`kind: meta`) | resolver → article HTML's `<meta name="citation_pdf_url">` → fetch with Referer. Headless. | `10.1001` JAMA · `10.1093` Oxford · `10.1542` Pediatrics · `10.1183` ERJ · `10.3171` J Neurosurg · `10.1038` Nature |
+| **citation-meta + headful nav** (`kind: meta, nav: true`) | same, but the resolver runs as a real headful navigation to clear a Cloudflare challenge | `10.1136` BMJ · `10.3174` AJNR · `10.2967` J Nucl Med |
+| **signed-URL** (`kind: lww`) | multi-step walk to a signed PDF URL: resolver → scrape article number → viewer HTML → signed `pdfUrl` with the right Referer chain, plus an Ovid-OCE fallback for ahead-of-print articles and concurrent-licence-seat (E3) back-off | `10.1097`/`10.1161`/`10.1213`/`10.2215` LWW/Ovid |
 
 `10.1016` Elsevier goes through the TDM API in `paper_fetch.py`, never the proxy.
 
@@ -132,9 +138,10 @@ How to register for the publisher TDM APIs (Elsevier / Wiley / Springer / Unpayw
 python paper_fetch.py 10.1371/journal.pone.0000000 out.pdf   # OA / TDM — works out of the box
 python paper_fetch.py --json 10.1016/xxx out.pdf             # agent mode: JSON envelope on stdout
 python holdings.py 10.1097/xxxxx                             # do I even have access to this?
-python library_session.py check                              # proxy layer (after you implement login)
+python library_session.py check                              # proxy layer (after config.yaml `auth:` is set)
 python library_session.py fetch 10.1002/xxxxx out.pdf
 python library_session.py stats                              # rate / block analysis
+python library_session.py routes                             # per-route scorecard + holdings gaps
 ```
 
 `examples/example-note.md` shows the intended Zotero + Obsidian workflow around it.
@@ -179,19 +186,19 @@ own watchdog.
 | Layer | This repo | You supply |
 |---|---|---|
 | OA + publisher TDM APIs (`paper_fetch.py`) | ✅ complete, runnable | your own API keys + email |
-| Institutional proxy (`library_session.py`) | 🦴 architecture + generic scaffolding; `login()` and the LWW signed-URL flow are **documented stubs** | implement them for your library |
+| Institutional proxy (`library_session.py`) | ✅ complete as of v1.0 — every route kind including the LWW/Ovid signed-URL flow, plus a generic form login | your library's endpoints + form selectors in `config.yaml` (SSO gates: a custom `login()`) |
 | Endpoints (resolver / proxy / remote-auth) | placeholders in `config.example.yaml` | your library's real values |
 | Entitlement table (`holdings.py`) | ✅ query side + schema | the table itself, from your library's A–Z list |
 
-The proxy layer is deliberately a skeleton: the scaffolding (config, secret store, request
-log, rate throttle, `stats`, host-rewrite, response classifier, the publisher route map,
-two-phase orchestration) is all here and the technique is fully documented in the
-docstrings — but `login()` and the LWW/Ovid multi-step flow are left for you to implement
-against your own institution, because those are the parts that are specific to one library.
-
-Off-campus access comes in four families (EZproxy, OpenAthens/Shibboleth, VPN, custom portal)
-and **only `login()` differs between them** — [docs/library-setup.md](docs/library-setup.md)
-walks you through identifying your family and finding your endpoints.
+Off-campus access comes in four families (EZproxy, OpenAthens/Shibboleth, VPN, custom
+portal) and **only `login()` differs between them**. The two form-based families — EZproxy
+and Django/NetScaler-style portals — are covered by the generic form login: set
+`auth.family: form` and point the selectors in `config.yaml` at your gate's login page
+(inspect it once in devtools; numeric-CAPTCHA gates are handled by the built-in offline
+OCR). SSO redirect chains (OpenAthens/Shibboleth) don't reduce to one form — set
+`auth.family: custom` and implement `login()` for your IdP; everything else works
+unchanged. [docs/library-setup.md](docs/library-setup.md) walks you through identifying
+your family and finding your endpoints.
 
 Then build your entitlement table → [docs/holdings.md](docs/holdings.md). It's what tells
 "this route is broken" apart from "you don't have access to this article" — and those two look

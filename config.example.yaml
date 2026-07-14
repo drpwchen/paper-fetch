@@ -35,6 +35,43 @@ institution:
   #   proxy_suffix: "YOUR-PROXY-HOST:PORT"
   proxy_suffix: ""
 
+auth:
+  # How library_session.py logs into your remote-auth gate.
+  #   form   — a plain login form (EZproxy, Django/NetScaler portals). Works out of the
+  #            box once the selectors below match your gate's login page (inspect it in
+  #            your browser's devtools).
+  #   custom — SSO redirect chains (OpenAthens / Shibboleth): implement login() yourself;
+  #            see docs/library-setup.md.
+  family: "form"
+
+  # Path of the login form, relative to institution.remote_auth_base.
+  #   Django-style gates: "/login/"     EZproxy: "/login"
+  login_path: "/login/"
+
+  # CSS selectors for the form fields. Defaults fit a Django-style gate; EZproxy's stock
+  # form is: user "input[name='user']", pass "input[name='pass']".
+  user_selector: "#id_username"
+  pass_selector: "#id_password"
+  submit_selector: "form button[type='submit'], form input[type='submit']"
+
+  # Numeric-CAPTCHA support (common on Django-style gates). Leave ALL THREE blank if your
+  # gate has no CAPTCHA — the flow degrades to plain fill+submit (the EZproxy case).
+  # captcha_image_path may contain {hashkey}, filled from captcha_hashkey_selector's value.
+  captcha_selector: ""            # e.g. "#id_captcha_value"
+  captcha_hashkey_selector: ""    # e.g. "#hashkey"
+  captcha_image_path: ""          # e.g. "/captcha/image/{hashkey}@2/"
+
+  # Session cookies to persist across runs (they are session-only in the browser, so they
+  # are saved to your secret store after login and re-injected next run). Map of cookie
+  # name -> exact cookie domain — find them in devtools after logging in: the session
+  # cookie on the remote-auth host, and the proxy-authorization cookie (often wildcarded
+  # on the parent domain). Empty {} = a generic default derived from remote_auth_base.
+  persist_cookies: {}
+  #   e.g.
+  #   persist_cookies:
+  #     sessionid: "gate.your-university.edu"
+  #     proxy-auth: ".your-university.edu"
+
 rate:
   # Courtesy delay (seconds) between proxy requests. 0 DISABLES it and prints a warning.
   # Systematic/bulk download can get your whole institution's IP blocked — keep this on.
