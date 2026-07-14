@@ -14,6 +14,7 @@ _EXAMPLE = pathlib.Path(__file__).with_name("config.example.yaml")
 _DEFAULTS = {
     "unpaywall_email": "",
     "paper_radar_db": "",
+    "holdings_db": "",
     "institution": {"sfx_base": "", "remote_auth_base": "", "proxy_suffix": ""},
     "rate": {"min_interval_s": 15, "contact": ""},
 }

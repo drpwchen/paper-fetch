@@ -10,28 +10,27 @@ your own institutional library proxy, and finally it just prints your library's 
 link so you can finish by hand. Every route is one you're already allowed to use; there is
 no Sci-Hub fallback here.
 
+It's the **download end** of a small paper pipeline — the piece that was missing longest,
+because it's the one that fights publishers:
+
+| Stage | Repo | What it does |
+|---|---|---|
+| discovery | [paper-radar](https://github.com/drpwchen/paper-radar) | journal/PubMed feeds → interest-scored → private triage |
+| **download** | **paper-fetch** (you are here) | **DOI → full-text PDF, via the route ladder** |
+| reading | [claude-paper-tools](https://github.com/drpwchen/claude-paper-tools) | `/paper-review` appraisal, `/paper-digest` content digest |
+
 ```bash
-# 30 seconds to first PDF (OA route needs zero keys — just your email in config.yaml)
+# 30 seconds to first PDF (the OA route needs zero keys — just your email in config.yaml)
 git clone https://github.com/drpwchen/paper-fetch && cd paper-fetch
 pip install -r requirements.txt && cp config.example.yaml config.yaml   # set unpaywall_email
 python paper_fetch.py 10.1186/s12984-023-01168-x out.pdf
-
-# agent mode: one JSON envelope on stdout, diagnostics on stderr, typed exit codes
-python paper_fetch.py --json 10.1016/j.apmr.2022.01.006 out.pdf
-# {"schema": 1, "doi": "...", "ok": true, "route": "elsevier", "tried": ["elsevier"],
-#  "bytes": 117204, "sha256": "57ee4e...", "path": "out.pdf", "elapsed_s": 1.4}
 ```
-
-It's the **download end** of a small paper pipeline. The **reading end**
-([claude-paper-tools](https://github.com/drpwchen/claude-paper-tools): appraisal +
-digest) and the **discovery end** ([paper-radar](https://github.com/drpwchen/paper-radar):
-an RSS learning radar) are separate repos.
 
 > **This project ships no institution's access.** You supply your own library's endpoints
 > (in `config.yaml`) and your own account (in a local secret store). It automates *your
 > own* authenticated session — it is not a paywall bypass and it does not share credentials.
 > Most readers will point an AI agent at this repo to understand and adapt the method; the
-> code is written to be readable for exactly that.
+> code — and [AGENTS.md](AGENTS.md) — are written for exactly that.
 
 ## The route ladder (the idea)
 
@@ -48,14 +47,41 @@ DOI
  └─ 4. Resolver link ────── print your library's SFX/OpenURL link → finish manually
 ```
 
-Three design rules worth stealing:
+Layer 1 works out of the box for anyone. Layers 2–3 are where the work is.
+
+Two rules worth stealing:
 - **Validate `%PDF` magic bytes**, never trust `Content-Type`. Paywalls and Cloudflare love
   to return `200 text/html` that *looks* like a PDF response but isn't.
-- **Don't trust the resolver's "subscribed / not subscribed" flag** — attempt the proxy
-  anyway; coverage metadata is often stale, and link resolvers are flaky besides (the same
-  DOI returned a full-text target on one call and none minutes later).
-- **Before blaming a route, check the article's entitlement.** See the trap below — it is the
-  single most expensive mistake in this problem space.
+- **Before blaming a route, check whether you're entitled to that article.** A working route
+  and a route you have no access through look *identical*. See
+  [docs/holdings.md](docs/holdings.md) — this is the single most expensive mistake in this
+  problem space.
+
+## Publisher routes, worked out the hard way
+
+The point of this repo. Each publisher exposes a different shape; these are the ones mapped
+and verified against live articles.
+
+| Shape | How it works | DOI prefixes |
+|---|---|---|
+| **template** (`PROVIDER_ROUTES`) | build the PDF URL from a host + path template | `10.1002`/`10.1111` Wiley · `10.1007`/`10.1186` Springer/BMC · `10.1056` NEJM · `10.1177` Sage · `10.1080` T&F · `10.2214` AJR · `10.1148` Radiology/RSNA · `10.1142` World Scientific |
+| **citation-meta** (`_CITATION_META_PREFIXES`) | resolver → article HTML's `<meta name="citation_pdf_url">` → fetch with Referer. Headless. | `10.1001` JAMA · `10.1093` Oxford · `10.1542` Pediatrics · `10.1183` ERJ · `10.3171` J Neurosurg · `10.1038` Nature |
+| **citation-meta + headful nav** (`_HEADFUL_META_PREFIXES`) | same, but the resolver runs as a real headful navigation to clear a Cloudflare challenge | `10.1136` BMJ · `10.3174` AJNR · `10.2967` J Nucl Med |
+| **signed-URL** (`_LWW_PREFIXES`) | multi-step walk to a signed PDF URL (stub here; fully documented in the docstring) | `10.1097`/`10.1161`/`10.1213` LWW/Ovid |
+
+`10.1016` Elsevier goes through the TDM API in `paper_fetch.py`, never the proxy.
+
+**Adding a new publisher? Reach for the `citation_pdf_url` route first.** Many sites with no
+DOI→PDF template still advertise the exact PDF URL in a `<meta name="citation_pdf_url">` tag on
+the article page (it's what Google Scholar indexes). Resolve the DOI through the proxy, read the
+meta, fetch it with the article as `Referer`. No reverse engineering needed.
+
+**And if a route comes back `cf_block`, try headful navigation before declaring it dead.** BMJ was
+documented here as a Cloudflare dead end that no stealth browser could clear. That was simply
+wrong: the WAF only blocks *headless* requests, and a real headful navigation passes on the first
+try — that's the whole `_HEADFUL_META_PREFIXES` variant. (Highwire sites like AJNR/JNM also loop
+on the generic `doi-org` resolver → give them an explicit `host` so the route uses that site's own
+`/lookup/doi/`.)
 
 ## How this compares to other paper fetchers
 
@@ -68,104 +94,24 @@ and *what happens when a route fails*.
 | Official publisher TDM APIs (your own keys) | — | — | rare | ✅ Elsevier · Wiley · Springer |
 | Institutional proxy layer (your own login, persistent session) | — | — | IP/cookie passthrough at best | ✅ full remote-auth walk, session survives reboots |
 | Per-publisher route shapes (URL template / `citation_pdf_url` / headful CF nav / multi-step signed-URL) | — | — | generic stealth browser | ✅ 20+ verified, named, documented |
-| **Entitlement ground truth** (your library's A–Z holdings → local SQLite, checked *before* blaming a route) | — | — | — | ✅ unique, as far as we know |
+| **Entitlement ground truth** (your library's A–Z holdings → local SQLite, checked *before* blaming a route) | — | — | — | ✅ `holdings.py`, as far as we know unique |
 | Route health from access logs (`stats`, per-route success history) | — | — | — | ✅ |
 | `%PDF` magic-byte validation | rare | rare | some do | ✅ |
 | Agent-native output (`--json` envelope, typed exit codes) | — | — | some do | ✅ |
 
 The two rows nothing else has — entitlement ground truth and log-driven route health — exist
 because they answer the question every other tool leaves you guessing on: **"is this route
-broken, or do I just not have access to this article?"** (See the entitlement trap below.)
-
-## ⚠ The entitlement trap (read this before you "fix" a publisher route)
-
-An article your library **doesn't hold** makes a *working* route return reader HTML or a 403 —
-**a signal indistinguishable from a broken template.**
-
-Three publishers in this project (Sage, Taylor & Francis, Oxford) were each written off as
-"returns HTML, needs reverse engineering". All three worked the moment they were retested with
-an article the library actually holds. Weeks of would-be reverse-engineering, avoided by
-picking a better test article.
-
-Two wrinkles that make this genuinely hard to see:
-- **Coverage is per-journal AND per-year.** A library may hold a journal for a *single 1990s
-  issue*, or exclude ahead-of-print. "We subscribe to that journal" is not enough — check the
-  year of the article you're testing with.
-- **Link resolvers (SFX/360/OpenURL) are unreliable oracles.** Same DOI, minutes apart,
-  different answers. Don't build an entitlement check on one.
-
-**What to use instead:** your library's **A–Z e-journal list** (journal → platform → coverage
-years) is stable, complete, and usually a plain public page. Scrape it once into a local table,
-then answer per DOI: CrossRef gives you ISSN + journal + year, the table gives you platform and
-coverage. That is your ground truth — and when a route fails on an article that IS covered, only
-*then* do you have a real bug.
-
-One caveat worth encoding: **"not in the list" ≠ "no access."** JAMA isn't in this library's
-e-journal list at all (it lives under a separate database entry) yet the proxy serves its PDFs
-fine. So treat a miss as *unknown*, warn, and try the proxy anyway.
-
-## Publisher routes verified working
-
-There are three route shapes. Pick by what the publisher exposes:
-
-| Shape | How it works | DOI prefixes |
-|---|---|---|
-| **template** (`PROVIDER_ROUTES`) | build the PDF URL from a host + path template | `10.1002`/`10.1111` Wiley · `10.1007`/`10.1186` Springer/BMC · `10.1056` NEJM · `10.1177` Sage · `10.1080` T&F · `10.2214` AJR · `10.1148` Radiology/RSNA · `10.1142` World Scientific |
-| **citation-meta** (`_CITATION_META_PREFIXES`) | resolver → article HTML's `<meta name="citation_pdf_url">` → fetch with Referer. Headless. | `10.1001` JAMA · `10.1093` Oxford · `10.1542` Pediatrics · `10.1183` ERJ · `10.3171` J Neurosurg · `10.1038` Nature |
-| **citation-meta + headful nav** (`_HEADFUL_META_PREFIXES`) | same, but the resolver runs as a real headful navigation to clear a Cloudflare challenge | `10.1136` BMJ · `10.3174` AJNR · `10.2967` J Nucl Med |
-| **signed-URL** (`_LWW_PREFIXES`) | multi-step walk to a signed PDF URL (stub here; fully documented in the docstring) | `10.1097`/`10.1161`/`10.1213` LWW/Ovid |
-
-`10.1016` Elsevier goes through the TDM API in `paper_fetch.py`, never the proxy.
-
-> **BMJ is the cautionary tale.** An earlier version listed BMJ as a Cloudflare "WAF dead end"
-> that no stealth browser could clear. That was wrong: the WAF only blocks *headless* requests
-> (and `request.get`, even from a headful context). A real **headful navigation passes on the
-> first try** — that's the whole `_HEADFUL_META_PREFIXES` variant. If a citation-meta route
-> comes back `cf_block`, switch it to headful nav before concluding anything. (Highwire sites
-> like AJNR/JNM also loop on the generic `doi-org` resolver → give them an explicit `host` so
-> the route uses that site's own `/lookup/doi/`.)
-
-The **`citation_pdf_url` route** is the one to reach for first with a new publisher: many sites
-with no DOI→PDF template still advertise the exact PDF URL in a `<meta name="citation_pdf_url">`
-tag on the article page (it's what Google Scholar indexes). Resolve the DOI through the proxy,
-read the meta, fetch it with the article as `Referer`. No reverse engineering needed.
-
-**A "broken route" is almost always "no entitlement to this article."** An article your library
-doesn't subscribe to (or whose year is outside the coverage) returns reader HTML or a 403 from
-the PDF endpoint — indistinguishable from a broken template. Sage, T&F, Oxford *and BMJ* were
-each wrongly declared routeless on this basis. Verify entitlement (journal + coverage year)
-against your library's holdings **before** concluding a route is broken.
-
-## What's public here vs. what you supply
-
-| Layer | This repo | You supply |
-|---|---|---|
-| OA + publisher TDM APIs (`paper_fetch.py`) | ✅ complete, runnable | your own API keys + email |
-| Institutional proxy (`library_session.py`) | 🦴 architecture + generic scaffolding; `login()` and the LWW signed-URL flow are **documented stubs** | implement them for your library |
-| Endpoints (resolver / proxy / remote-auth) | placeholders in `config.example.yaml` | your library's real values |
-
-The proxy layer is deliberately a skeleton: the scaffolding (config, secret store, request
-log, rate throttle, `stats`, host-rewrite, response classifier, the publisher route map,
-two-phase orchestration) is all here and the technique is fully documented in the
-docstrings — but `login()` and the LWW/Ovid multi-step flow are left for you to implement
-against your own institution, because those are the parts that are specific to one library.
-
-**Adapting to YOUR library:** off-campus access comes in four families (EZproxy,
-OpenAthens/Shibboleth, VPN, custom portal) and only `login()` differs between them —
-[docs/library-setup.md](docs/library-setup.md) walks you through identifying your family
-and finding your endpoints.
+broken, or do I just not have access to this article?"**
 
 ## Install
 
 ```bash
-git clone https://github.com/drpwchen/paper-fetch && cd paper-fetch
-pip install -r requirements.txt
-python -m patchright install chromium      # only needed for the proxy layer
-cp config.example.yaml config.yaml         # fill in your email + your library's endpoints
+python -m patchright install chromium      # only needed for the institutional proxy layer
 ```
 
-Store publisher/library credentials in a local DPAPI secret store (Windows), never in
-`config.yaml`:
+(The clone / `pip install` / `cp config.example.yaml config.yaml` steps are in the quickstart
+above.) Then store publisher and library credentials in a local DPAPI secret store (Windows) —
+never in `config.yaml`:
 
 ```powershell
 powershell -File ~/.secrets/secret.ps1 set ELSEVIER_TDM_KEY
@@ -185,6 +131,7 @@ How to register for the publisher TDM APIs (Elsevier / Wiley / Springer / Unpayw
 ```bash
 python paper_fetch.py 10.1371/journal.pone.0000000 out.pdf   # OA / TDM — works out of the box
 python paper_fetch.py --json 10.1016/xxx out.pdf             # agent mode: JSON envelope on stdout
+python holdings.py 10.1097/xxxxx                             # do I even have access to this?
 python library_session.py check                              # proxy layer (after you implement login)
 python library_session.py fetch 10.1002/xxxxx out.pdf
 python library_session.py stats                              # rate / block analysis
@@ -215,7 +162,7 @@ your library's SFX link for a manual finish. `sha256` lets batch callers dedupe.
 | `4` | profile busy (another fetch holds the lock) — `library_session.py` only | **retry serially** — not a missing paper |
 | `5` | watchdog abort (`PAPERFETCH_TIMEOUT_S`, default 240 s) — `library_session.py` only | **retry once** — not a missing paper |
 
-==Codes `4` and `5` mean "try again, one at a time" — never record them as "no full text."==
+Codes `4` and `5` mean "try again, one at a time" — never record them as "no full text."
 Conflating them is the single easiest way to wrongly conclude a paper is unobtainable.
 
 ### ⚠ Before you batch or parallelize
@@ -227,6 +174,33 @@ missing). Rate-limit reasoning, batch patterns, and how to call this from LLM ag
 [docs/operations.md](docs/operations.md). Never wrap the script in `timeout` — it has its
 own watchdog.
 
+## Adapting it to YOUR library
+
+| Layer | This repo | You supply |
+|---|---|---|
+| OA + publisher TDM APIs (`paper_fetch.py`) | ✅ complete, runnable | your own API keys + email |
+| Institutional proxy (`library_session.py`) | 🦴 architecture + generic scaffolding; `login()` and the LWW signed-URL flow are **documented stubs** | implement them for your library |
+| Endpoints (resolver / proxy / remote-auth) | placeholders in `config.example.yaml` | your library's real values |
+| Entitlement table (`holdings.py`) | ✅ query side + schema | the table itself, from your library's A–Z list |
+
+The proxy layer is deliberately a skeleton: the scaffolding (config, secret store, request
+log, rate throttle, `stats`, host-rewrite, response classifier, the publisher route map,
+two-phase orchestration) is all here and the technique is fully documented in the
+docstrings — but `login()` and the LWW/Ovid multi-step flow are left for you to implement
+against your own institution, because those are the parts that are specific to one library.
+
+Off-campus access comes in four families (EZproxy, OpenAthens/Shibboleth, VPN, custom portal)
+and **only `login()` differs between them** — [docs/library-setup.md](docs/library-setup.md)
+walks you through identifying your family and finding your endpoints.
+
+Then build your entitlement table → [docs/holdings.md](docs/holdings.md). It's what tells
+"this route is broken" apart from "you don't have access to this article" — and those two look
+exactly alike from the outside.
+
+**Not a programmer?** That's the intended case. Point an AI coding agent at this repo and ask it
+to wire up your library; [AGENTS.md](AGENTS.md) is written for it — deployment steps, the
+verification smoke test, and the hard lines it must not cross.
+
 ## Red lines
 
 - For people who **already have legitimate subscription access**. It automates your own
@@ -236,19 +210,7 @@ own watchdog.
 - Never commit `config.yaml`, `*.dpapi`, or `access_log.jsonl` (the `.gitignore` blocks them).
 
 MIT licensed. Contributions that add publisher route templates or adapt the proxy layer to
-other library systems are welcome.
-
-## Changelog
-
-Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md).
-
-## The rest of the pipeline
-
-| Repo | Role |
-|---|---|
-| [paper-radar](https://github.com/drpwchen/paper-radar) | **discovery** — journal/PubMed feeds → interest-scored → private triage |
-| **paper-fetch** (you are here) | **download** — DOI → full-text PDF via the route ladder |
-| [claude-paper-tools](https://github.com/drpwchen/claude-paper-tools) | **reading** — `/paper-review` appraisal, `/paper-digest` content digest |
+other library systems are welcome. Notable changes: [CHANGELOG.md](CHANGELOG.md).
 
 ---
 

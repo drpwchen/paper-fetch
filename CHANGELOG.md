@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-07-14
+
+### Added
+- **`holdings.py` — the entitlement layer, now actually shipped.** DOI → ISSN + year
+  (CrossRef) → your library's holdings table → `subscribed` / `covered` / platform. This is
+  what tells "the route is broken" apart from "you have no access to this article", the two
+  being indistinguishable from the outside. Query side + schema are here; the table itself is
+  yours to build (`docs/holdings.md`) — every library's A–Z e-journal page is different HTML,
+  so no scraper is shipped. Previously the README claimed this capability without the code.
+  New optional config key `holdings_db`.
+- **`docs/holdings.md`**: why per-article link-resolver queries are an unreliable entitlement
+  oracle, the six-column table schema, the multi-segment `coverage` parsing trap, and the
+  "not in the table ≠ no access" caveat.
+- **`AGENTS.md` rewritten for the agents that actually deploy this**: a verification smoke test
+  in the happy path (OA DOI must yield a PDF before touching the library layer); a
+  "check entitlement before you 'fix' a route" section; the orchestrator contract (`--json`
+  envelope, exit codes `4`/`5` mean *retry*, never "no full text"; strictly serial; no external
+  `timeout`); links to the four-family library setup guide.
+
+### Changed
+- **README reordered**: the three-repo pipeline table moved to the top; the verified
+  publisher-route table promoted above Install (it is the substance of the repo); the
+  entitlement trap demoted to a two-line pointer into `docs/holdings.md`; duplicate
+  clone/install block removed; adaptation guidance consolidated into one "Adapting it to YOUR
+  library" section after Use.
+
+### Fixed
+- `AGENTS.md` pointed at a README section that had moved to `docs/library-setup.md` in 0.4.1.
+
 ## [0.4.1] — 2026-07-14
 
 ### Changed

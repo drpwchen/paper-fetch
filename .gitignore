@@ -17,3 +17,7 @@ venv/
 # staging PDFs / scratch
 *.pdf
 staging/
+
+# entitlement table + DOI→ISSN cache (built from YOUR library's A–Z list; not ours to ship)
+holdings.sqlite
+.doi_issn_cache.json

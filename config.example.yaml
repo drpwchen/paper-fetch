@@ -12,6 +12,12 @@ unpaywall_email: ""
 # Optional: a local sqlite DB (table `papers(doi, oa_pdf_url)`) for an extra OA fallback.
 paper_radar_db: ""
 
+# Optional but recommended: your library's holdings table (journal → platform → coverage
+# years), built from its A–Z e-journal list. This is what tells you "no entitlement to this
+# article" apart from "the route is broken" — see docs/holdings.md for the 6-column schema.
+# Blank = holdings.sqlite next to holdings.py, if present; no table at all = checks skipped.
+holdings_db: ""
+
 institution:
   # Your library's link resolver (SFX / other OpenURL resolver). Find it in your library
   # portal → e-resources → link resolver. {doi} is substituted at runtime. Leave blank to
