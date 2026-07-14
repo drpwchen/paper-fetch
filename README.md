@@ -17,7 +17,7 @@ because it's the one that fights publishers:
 |---|---|---|
 | discovery | [paper-radar](https://github.com/drpwchen/paper-radar) | journal/PubMed feeds → interest-scored → private triage |
 | **download** | **paper-fetch** (you are here) | **DOI → full-text PDF, via the route ladder** |
-| reading | [claude-paper-tools](https://github.com/drpwchen/claude-paper-tools) | `/paper-review` appraisal, `/paper-digest` content digest |
+| reading | [paper-review-and-digest](https://github.com/drpwchen/paper-review-and-digest) | `/paper-review` appraisal, `/paper-digest` content digest |
 
 ```bash
 # 30 seconds to first PDF (the OA route needs zero keys — just your email in config.yaml)
