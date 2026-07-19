@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-07-19
+
+Docs only — gaps found watching a real first-time install (a colleague's AI agent
+misdiagnosed a temporary rate-limit block as broken credentials and told the user to
+apply for library accounts they already had).
+
+### Added
+- README **"When you get blocked"** section: block-signal triage table (login-gate
+  rate-limit vs `cf_challenge` vs Ovid E3 seat cooldown vs exit `4`/`5`), how long to
+  wait, and the stop-after-two-identical-failures rule.
+- AGENTS.md: same stop-don't-retry discipline for agents, plus "verify credentials by
+  manual browser login — never send the user off to apply for accounts they already have."
+
 ## [1.0.0] — 2026-07-14
 
 **No more stubs.** Everything platform-generic that the reference implementation had been

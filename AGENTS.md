@@ -80,6 +80,12 @@ first try. If a citation-meta route returns `cf_block`, try `nav=True` before co
   and systematic downloading gets the institution's whole IP range blocked. Batch patterns are in
   [docs/operations.md](docs/operations.md).
 - Never wrap the script in an external `timeout` — it has its own watchdog (`PAPERFETCH_TIMEOUT_S`).
+- **The same failure twice in a row means stop, not retry.** Rapid repeated attempts turn a
+  temporary block (login gate, Cloudflare, Ovid E3 seat limit) into a longer one — worst case
+  against the institution's shared IP. Tell the user to wait 30–60 minutes; triage table in
+  the README's "When you get blocked" section. If credentials are suspect, have the user
+  verify them by logging in manually in a browser — do not tell them to apply for new
+  accounts or permissions they already have.
 
 ## Hard lines — do not cross
 

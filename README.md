@@ -181,6 +181,25 @@ missing). Rate-limit reasoning, batch patterns, and how to call this from LLM ag
 [docs/operations.md](docs/operations.md). Never wrap the script in `timeout` — it has its
 own watchdog.
 
+### ⚠ When you get blocked (mostly a first-time-setup problem)
+
+The classic first-day loop is: fail → immediately re-run → fail → re-run. **Rapid repeated
+login or fetch attempts get you temporarily blocked** — by your library's login gate, by
+Cloudflare, or by a publisher — and a temporary block looks exactly like a broken tool or
+wrong credentials.
+
+| Signal | Meaning | What to do |
+|---|---|---|
+| `[login] FAILED after retries` | wrong creds, CAPTCHA misreads, or the gate is rate-limiting you | verify the credentials by logging in **manually in a browser** first; if they work there, you're temporarily blocked → wait 30–60 min |
+| `cf_challenge` / `cf_block` | Cloudflare intercepted the request | the tool retries headful once automatically; if it persists, wait — don't hammer |
+| Ovid/LWW route stalls or errors | E3 concurrent-licence-seat limit | wait 30 min (`PAPERFETCH_OVID_COOLDOWN_S`); the tool backs off on its own |
+| exit `4` / `5` | profile busy / watchdog | retry serially later — **not** a missing paper |
+
+One rule covers all of it: **the same failure twice in a row means stop**, run
+`python library_session.py stats` to see what's being blocked, and wait 30–60 minutes.
+Retrying in a tight loop only escalates a temporary block — worst case against your whole
+institution's shared IP.
+
 ## Adapting it to YOUR library
 
 | Layer | This repo | You supply |
