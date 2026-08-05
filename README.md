@@ -246,7 +246,7 @@ other library systems are welcome. Notable changes: [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
-☕ Find this useful? [Buy me a boba](https://drpwchen.bobaboba.me).
+🧋 Find this useful? [Buy me a drink](https://drpwchen.com/en/support/).
 
 ---
 
