@@ -150,7 +150,22 @@ python library_session.py stats    # rate / block analysis
 
 ### Step 5: Verify and bidirectional links
 
-- Confirm the item: `search_by_citation_key` with the BBT key (`authorShortTitle2024`).
+- Confirm the item: `search_by_citation_key` with the BBT key.
+- ==**The citekey is an exact-match string — copy it, never generate it.**== Read
+  `citationKey` off the `add_by_doi` / `search_items` response (or
+  `curl -s "http://localhost:23119/better-bibtex/export/library?/1/library.bibtex" | grep -i <doi>`)
+  and paste it character for character. The familiar `authorShortTitle2024` shape is for
+  *recognising* a key, not producing one: BBT keeps hyphens (`guerra-armas…`), case-folds
+  unpredictably, and appends a disambiguator (`…2018a`) when an author publishes twice in a
+  year. A key you reconstruct looks right in review and points nowhere. Can't retrieve one
+  (Zotero closed, item not in the library)? Write `citekey: ""` and say so — an empty value
+  is better than an invented one.
+- Prove it, don't eyeball it:
+  ```bash
+  python {REPO}/citekey_lint.py <note.md>      # 0 clean · 1 fabricated · 3 unverifiable
+  ```
+  On exit 1 the lint prints the authoritative key for that DOI, so the fix is a copy.
+  Exit 3 means Zotero was unreachable — report it as unverified, not as a pass.
 - If a PDF was attached, confirm it became a **linked file** in your folder (not in
   `Zotero/storage/`) — that's the "not uploaded" guarantee.
 - **Obsidian → Zotero** frontmatter:

@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-08-07
+
+### Added
+- **`citekey_lint.py`** — proves every citekey in your notes exists in Zotero's Better BibTeX
+  library, and prints the authoritative key for that DOI when one doesn't. Works on notes/dirs
+  (or `$NOTES_DIR`), bare `--keys` before you write them, and `--cards` JSON payloads. Exits
+  0 clean / 1 offenders / **3 unverifiable** — if Zotero isn't running the check cannot pass,
+  it can only decline to answer.
+
+### Changed
+- **The citekey is copied from Zotero, never reconstructed** (`skills/paper-download/SKILL.md`).
+  The previous wording introduced the BBT key *as* the pattern `authorShortTitle2024`, which
+  invites rebuilding it from author + title + year. Real BBT keys keep hyphens
+  (`guerra-armas…`), case-fold unpredictably, and gain a `…2018a` disambiguator when an author
+  publishes twice in a year — so a reconstructed key reads correct in review and points
+  nowhere. No key retrievable → write `citekey: ""` and report it. No behavior change to the
+  fetch pipeline.
+
 ## [1.0.1] — 2026-07-19
 
 Docs only — gaps found watching a real first-time install (a colleague's AI agent
