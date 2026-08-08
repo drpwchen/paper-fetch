@@ -31,6 +31,30 @@ another's. The code already handles this (it re-submits the login form on the bo
 itself, which is what completes the handshake); it's mentioned here so a bounce-to-login on
 a *new* publisher doesn't read as a broken session.
 
+### Where the credentials and cookies are kept (`secrets.backend`)
+
+`LIB_USER` / `LIB_PASS` and the `LIB_COOKIE_*` values above never go in `config.yaml`. They
+live in a secret store chosen by platform, and `auto` (the default) needs no configuration:
+
+| `secrets.backend` | Store | Store a value |
+|---|---|---|
+| `auto` | dpapi on Windows, keychain on macOS, env elsewhere | — |
+| `dpapi` | Windows DPAPI (CurrentUser), files under `~/.secrets` | `powershell -File ~/.secrets/secret.ps1 set LIB_USER` |
+| `keychain` | macOS login Keychain, service `paper-fetch` | `security add-generic-password -s paper-fetch -a LIB_USER -U -w` (put `-w` last so it prompts — inline, the password lands in shell history and `ps`) |
+| `env` | environment variables of the same name | `export LIB_USER=...` |
+| `none` | nothing is read or written | — |
+
+`SECRETS_BACKEND` in the environment overrides the config file; an unrecognized name exits
+at startup rather than surfacing later as a secret that seems to have gone missing.
+
+⚠ `env` has nowhere to write to, so the persisted cookies in `auth.persist_cookies` cannot
+survive a run — the layer logs in again each time. On a headless Linux box that is usually
+the right trade; if you want persistence there, point `secrets.backend` at a store you have.
+
+⚠ On macOS a locked Keychain (typical over SSH with no GUI session) can't be written to.
+Cookie persistence then degrades to a warning and the run continues — it costs one extra
+login, not the fetch.
+
 ## Finding your library's endpoints
 
 The proxy layer needs three values in `config.yaml`. None of them are secret — they're your

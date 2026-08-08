@@ -52,13 +52,15 @@ DOI / PMID / title
 - **Semantic Scholar MCP** (PMID→DOI, title search).
 - `config.yaml` filled in (copy from `config.example.yaml`): your email + your library's
   endpoints.
-- DPAPI tokens for paywalled-but-mineable publishers (optional, read by `paper_fetch.py`;
-  missing token → script prints the `secret.ps1 set` command, never leaks a value):
+- DPAPI tokens for paywalled-but-mineable publishers (optional, read by `paper_fetch.py`,
+  which is still Windows-only — missing token → script prints the `secret.ps1 set` command,
+  never leaks a value):
   - `ELSEVIER_TDM_KEY` — register at dev.elsevier.com
   - `WILEY_TDM_TOKEN` — accept click-through at https://static.wiley.com/tdm/ then store
   - `SPRINGER_API_KEY` — register at dev.springernature.com (OA direct often works without it)
-- DPAPI credentials for the institutional proxy path (`library_session.py`):
-  `LIB_USER` / `LIB_PASS` — your own library account.
+- Secret-store credentials for the institutional proxy path (`library_session.py`):
+  `LIB_USER` / `LIB_PASS` — your own library account. The backend follows the platform
+  (DPAPI on Windows, login Keychain on macOS, env vars elsewhere) — README → Install.
 
 ## Main Flow
 
@@ -109,7 +111,8 @@ python paper_fetch.py <DOI> <out.pdf>
 
 - Routes by DOI prefix, validates `%PDF`, falls back to Unpaywall, and on total failure
   prints your institution's SFX link (from `config.yaml`).
-- Keys read from DPAPI, never printed. PC-only (DPAPI is PC-local).
+- Keys read from DPAPI, never printed. Windows-only for now (this script has not been
+  moved onto the pluggable secret store yet; `library_session.py` has).
 - **TDM route lands a file on disk → drag it onto the Zotero item.** ZotMoov then moves it
   to your linked-files folder and converts to linked.
 
@@ -124,9 +127,10 @@ python library_session.py check    # session still valid?
 python library_session.py stats    # rate / block analysis
 ```
 
-- Logs into your library's remote-auth system automatically: credentials from DPAPI
-  (`LIB_USER`/`LIB_PASS`), numeric CAPTCHA solved offline by **ddddocr**. Session persists
-  across browser close/reboot (cookies saved to DPAPI `LIB_COOKIE_*`).
+- Logs into your library's remote-auth system automatically: credentials from the secret
+  store (`LIB_USER`/`LIB_PASS`), numeric CAPTCHA solved offline by **ddddocr**. Session
+  persists across browser close/reboot (cookies saved as `LIB_COOKIE_*`; the `env` backend
+  can't persist them, so that one logs in each run).
 - Downloads via proxy-rewrite domains using **patchright** (stealth Playwright) so it
   passes the publisher's Cloudflare challenge **headless — no window, no interaction**.
   (`login` is the exception: it runs headful, because the proxy's JS-redirect interstitial

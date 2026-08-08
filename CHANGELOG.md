@@ -5,6 +5,62 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-08-08
+
+Runs on macOS and Linux. The institutional-proxy layer was Windows-only in three
+load-bearing places, none of which surfaced until the first credential read.
+
+### Added
+- **Pluggable secret store** — three backends behind one interface: `dpapi` (Windows DPAPI,
+  unchanged), `keychain` (macOS login Keychain, service `paper-fetch`), `env` (plain
+  environment variables). Selected by `secrets.backend` in `config.yaml` or the
+  `SECRETS_BACKEND` environment variable; the default `auto` resolves per platform, so
+  **existing Windows installs behave exactly as before with no config change.**
+  Contributed by [@drivysu](https://github.com/drivysu) (#1).
+- **POSIX process handling** — `_pid_alive` uses `os.kill(pid, 0)` off Windows, and the
+  watchdog's tree-kill falls back to a recursive `pgrep -P` walk instead of `taskkill`.
+  Deliberately not `os.killpg`: this process usually shares its process group with the
+  interactive shell, so killing the group would take the user's terminal down with it. (#1)
+- `psutil` promoted to a real dependency. It was always the preferred teardown path; without
+  it an orphaned chromium leaks RAM until reboot.
+- Per-platform install matrix in the README, and a `secrets.backend` section in
+  [docs/library-setup.md](docs/library-setup.md).
+
+### Changed
+- `dpapi_get` / `dpapi_get_opt` / `dpapi_set` are now `secret_get` / `secret_get_opt` /
+  `secret_set`; the DPAPI implementations stay as private helpers. A miss names the active
+  backend and the command that stores the secret **for that backend**, rather than always
+  printing the PowerShell one.
+
+### Fixed
+- `_dpapi_set` creates `~/.secrets` when absent (a first-run write used to fail).
+- An unrecognized `secrets.backend` now exits at startup. It previously raised only on read
+  while `secret_set` silently skipped — so a typo'd name looked like a stored cookie that
+  kept disappearing.
+- `keychain` on a machine with no `security(1)` raised a bare `FileNotFoundError`,
+  indistinguishable from "secret not stored" — it sent you looking for the wrong problem.
+  It now names the backend and what it needs.
+- A locked macOS Keychain (SSH session, no GUI) no longer aborts a fetch that already
+  succeeded: failing to persist a cookie degrades to a warning, the trade-off `env` already
+  made.
+- The POSIX tree-kill reports a missing `pgrep` on stderr instead of returning silently — a
+  silent return reads as a clean teardown while chromium is still running.
+
+### Known limitation
+- `paper_fetch.py` still reads publisher TDM keys through the Windows PowerShell store, so
+  **the TDM layer stays Windows-only** — `10.1016` (Elsevier) included. Off Windows those
+  routes are skipped gracefully (but the printed hint still names PowerShell), leaving the
+  open-access ladder and the full institutional-proxy layer. Porting it is next.
+
+### Verification
+- Windows regression on 11 Pro (26200) / Python 3.12.1 / psutil 7.2.2, diffing `master`
+  against the merged commit: pre-existing DPAPI secrets decrypt to identical hashes,
+  set→get round-trips (including non-ASCII), the miss path, `_pid_alive`, and the whole
+  single-instance lock behaviour (stale-lock steal, live-lock exit 4) are unchanged; the OA
+  ladder still returns a PDF end to end. The contributor verified macOS 15 / Python 3.12
+  against a Django-style gate with a numeric CAPTCHA. **The Linux `env` path is reasoned
+  about, not field-tested.**
+
 ## [1.1.0] — 2026-08-07
 
 ### Added
@@ -307,7 +363,10 @@ inherently specific to your own library and must be implemented against it.
   ahead-of-print articles routinely report OA while offering no `url_for_pdf`. Fall through
   to the institutional route instead of concluding the paper is unavailable.
 
-[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/drpwchen/paper-fetch/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/drpwchen/paper-fetch/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/drpwchen/paper-fetch/compare/v1.0.1...v1.1.0
+[1.0.1]: https://github.com/drpwchen/paper-fetch/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/drpwchen/paper-fetch/compare/v0.5.2...v1.0.0
 [0.5.2]: https://github.com/drpwchen/paper-fetch/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/drpwchen/paper-fetch/compare/v0.5.0...v0.5.1

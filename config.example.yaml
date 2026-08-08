@@ -82,7 +82,9 @@ secrets:
   #               history and in `ps` output.
   #   env       — plain environment variables. Cannot persist session cookies, so
   #               every run logs in again.
-  # The SECRETS_BACKEND environment variable overrides this file.
+  #   none      — read and store nothing (OA/TDM layers only).
+  # The SECRETS_BACKEND environment variable overrides this file. An unrecognized
+  # name exits at startup rather than looking like a missing secret later.
   backend: "auto"
 
 rate:

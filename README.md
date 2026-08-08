@@ -2,6 +2,7 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Windows · macOS · Linux](https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-lightgrey)
 ![Publisher routes verified](https://img.shields.io/badge/publisher%20routes-20%2B%20verified-brightgreen)
 
 Give it a DOI; it walks a **route ladder** to get the full-text PDF the cheapest, most
@@ -62,8 +63,6 @@ Two rules worth stealing:
 The point of this repo. Each publisher exposes a different shape; these are the ones mapped
 and verified against live articles.
 
-| Shape | How it works | DOI prefixes |
-|---|---|---|
 All four shapes live in one dispatch table — `ROUTES` in `library_session.py`, keyed by DOI
 prefix with a `kind` of `tpl` / `meta` / `lww` — and as of v1.0 every one of them ships
 working code:
@@ -116,18 +115,33 @@ python -m patchright install chromium      # only needed for the institutional p
 ```
 
 (The clone / `pip install` / `cp config.example.yaml config.yaml` steps are in the quickstart
-above.) Then store publisher and library credentials in a local DPAPI secret store (Windows) —
-never in `config.yaml`:
+above.) Runs on **Windows, macOS and Linux**.
 
-```powershell
-powershell -File ~/.secrets/secret.ps1 set ELSEVIER_TDM_KEY
-powershell -File ~/.secrets/secret.ps1 set WILEY_TDM_TOKEN
-powershell -File ~/.secrets/secret.ps1 set LIB_USER   # your own library account
-powershell -File ~/.secrets/secret.ps1 set LIB_PASS
-```
+Credentials never live in `config.yaml` — they go in a secret store, and the right one is
+picked for your platform with no configuration:
 
-(Any secret store works — the code shells out to `~/.secrets/secret.ps1 get <NAME>`; swap in
-your own if you're not on Windows DPAPI.)
+| Platform | Default backend | Store a secret |
+|---|---|---|
+| Windows | `dpapi` — DPAPI, CurrentUser, `~/.secrets` | `powershell -File ~/.secrets/secret.ps1 set LIB_USER` |
+| macOS | `keychain` — login Keychain, service `paper-fetch` | `security add-generic-password -s paper-fetch -a LIB_USER -U -w` |
+| Linux / other | `env` — environment variables | `export LIB_USER=...` |
+
+Put `-w` **last** in the `security` command so it prompts for the value — passing it inline
+leaves the password in your shell history and in `ps` output.
+
+Override the choice with `secrets.backend` in `config.yaml` or the `SECRETS_BACKEND`
+environment variable (`dpapi` · `keychain` · `env` · `none`); an unknown name fails at
+startup rather than looking like a missing secret later. The `env` backend has nowhere to
+persist the proxy session cookie, so that layer logs in once per run.
+
+The names to store: `LIB_USER` / `LIB_PASS` (your own library account), plus whichever
+publisher TDM keys you have — `ELSEVIER_TDM_KEY`, `WILEY_TDM_TOKEN`, `SPRINGER_API_KEY`.
+
+> **Off-Windows caveat, accurate as of v1.2.0.** `paper_fetch.py` still reads the publisher
+> TDM keys through the Windows PowerShell store, so **the TDM layer is Windows-only** — and
+> `10.1016` (Elsevier) is one of the busiest routes in the ladder. On macOS and Linux you get
+> the full open-access ladder and the full institutional-proxy layer; TDM routes are skipped,
+> with a hint that still names PowerShell. Porting them is the next piece of work.
 
 How to register for the publisher TDM APIs (Elsevier / Wiley / Springer / Unpaywall) →
 [docs/publisher-tdm-apis.md](docs/publisher-tdm-apis.md).

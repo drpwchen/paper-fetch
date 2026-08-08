@@ -242,17 +242,25 @@ ROUTES: dict[str, dict] = {
 KEYCHAIN_SERVICE = os.environ.get("PAPERFETCH_KEYCHAIN_SERVICE", "paper-fetch")
 
 
+_BACKENDS = ("dpapi", "keychain", "env", "none")
+
+
 def _resolve_backend() -> str:
     choice = (os.environ.get("SECRETS_BACKEND")
               or (CFG.get("secrets") or {}).get("backend")
               or "auto").lower()
-    if choice != "auto":
-        return choice
-    if sys.platform == "win32":
-        return "dpapi"
-    if sys.platform == "darwin":
-        return "keychain"
-    return "env"
+    if choice == "auto":
+        if sys.platform == "win32":
+            return "dpapi"
+        if sys.platform == "darwin":
+            return "keychain"
+        return "env"
+    if choice not in _BACKENDS:
+        # Die at import, not at the first credential read: a typo'd backend name otherwise
+        # surfaces as a stored secret gone missing (and `secret_set` would silently skip).
+        sys.exit(f"secrets backend {choice!r} is not one of: auto, {', '.join(_BACKENDS)}. "
+                 "Set `secrets.backend` in config.yaml or the SECRETS_BACKEND env var.")
+    return choice
 
 
 SECRETS_BACKEND = _resolve_backend()
@@ -307,10 +315,24 @@ def _dpapi_set(name: str, value: str) -> None:
 
 
 # --- macOS Keychain ---------------------------------------------------------
+def _keychain_run(*args: str) -> subprocess.CompletedProcess:
+    """Run `security`, naming the cause when the binary isn't there.
+
+    A bare FileNotFoundError from subprocess would be indistinguishable from the one
+    `secret_get` raises for "secret not stored" — sending the user to look for a missing
+    credential when the real problem is the backend choice.
+    """
+    try:
+        return subprocess.run(["security", *args], capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "secrets backend 'keychain' needs macOS's security(1), which is not on PATH. "
+            "Set `secrets.backend` (config.yaml) or SECRETS_BACKEND to 'dpapi' on Windows, "
+            "'env' elsewhere.") from None
+
+
 def _keychain_get(name: str) -> str | None:
-    r = subprocess.run(
-        ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name, "-w"],
-        capture_output=True, text=True)
+    r = _keychain_run("find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name, "-w")
     if r.returncode != 0:
         return None
     # Strip only the newline `security` appends — a password may legitimately begin
@@ -319,10 +341,16 @@ def _keychain_get(name: str) -> str | None:
 
 
 def _keychain_set(name: str, value: str) -> None:
-    subprocess.run(
-        ["security", "add-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name,
-         "-U", "-w", value],
-        check=True, capture_output=True)
+    # The value rides in argv, where `ps` can see it. macOS hides other users' arguments
+    # from unprivileged `ps` and `security` offers no stdin path for -w, so this is the
+    # available trade-off; the form documented for humans prompts instead.
+    r = _keychain_run("add-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name,
+                      "-U", "-w", value)
+    if r.returncode != 0:
+        # A locked Keychain (ssh session, no GUI) must not abort a fetch that already
+        # succeeded. Not persisting costs one extra login — the same trade-off as 'env'.
+        print(f"[secrets] keychain could not store '{name}' (security exit {r.returncode}: "
+              f"{(r.stderr or '').strip()[:120]}); continuing", file=sys.stderr)
 
 
 # --- public interface -------------------------------------------------------
@@ -485,6 +513,12 @@ def _posix_kill_descendants(pid: int) -> None:
     try:
         out = subprocess.run(["pgrep", "-P", str(pid)],
                              capture_output=True, text=True, timeout=10).stdout.split()
+    except FileNotFoundError:
+        # psutil is the preferred path and this is the fallback; with neither, a spawned
+        # chromium outlives us. Say so — a silent return looks like a clean teardown.
+        print("[watchdog] pgrep not found: cannot walk the process tree, a spawned chromium "
+              "may be left running. `pip install psutil` to avoid this path.", file=sys.stderr)
+        return
     except Exception:
         return
     for child in out:
