@@ -28,6 +28,7 @@ _DEFAULTS = {
         "persist_cookies": {},
     },
     "rate": {"min_interval_s": 15, "contact": ""},
+    "secrets": {"backend": "auto"},
 }
 
 

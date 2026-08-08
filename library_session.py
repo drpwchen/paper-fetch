@@ -95,6 +95,7 @@ import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -231,17 +232,51 @@ ROUTES: dict[str, dict] = {
 }
 
 
+# --- secret store ----------------------------------------------------------
+# Three backends behind one interface, so the same code path works on every OS:
+#   dpapi     — Windows DPAPI (CurrentUser, no entropy), the original store
+#   keychain  — macOS login Keychain via `security`
+#   env       — plain environment variables (documented in config.example.yaml)
+# `auto` (the default) picks dpapi on Windows, keychain on macOS, env elsewhere.
+# Precedence: SECRETS_BACKEND env var > config.yaml `secrets.backend` > "auto".
+KEYCHAIN_SERVICE = os.environ.get("PAPERFETCH_KEYCHAIN_SERVICE", "paper-fetch")
+
+
+def _resolve_backend() -> str:
+    choice = (os.environ.get("SECRETS_BACKEND")
+              or (CFG.get("secrets") or {}).get("backend")
+              or "auto").lower()
+    if choice != "auto":
+        return choice
+    if sys.platform == "win32":
+        return "dpapi"
+    if sys.platform == "darwin":
+        return "keychain"
+    return "env"
+
+
+SECRETS_BACKEND = _resolve_backend()
+
+
+def _store_hint(name: str) -> str:
+    """How to store `name` under the active backend — printed on a miss."""
+    if SECRETS_BACKEND == "dpapi":
+        return f"powershell -File ~/.secrets/secret.ps1 set {name}"
+    if SECRETS_BACKEND == "keychain":
+        # -w LAST so `security` prompts, keeping the value out of shell history and `ps`.
+        return f"security add-generic-password -s {KEYCHAIN_SERVICE} -a {name} -U -w"
+    return f"export {name}=... (backend 'env')"
+
+
 # --- DPAPI (pure python, CurrentUser, no entropy) ---------------------------
 class _BLOB(ctypes.Structure):
     _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
 
 
-def dpapi_get(name: str) -> str:
+def _dpapi_get(name: str) -> str | None:
     f = SECRETS_DIR / f"{name}.dpapi"
     if not f.exists():
-        raise FileNotFoundError(
-            f"secret '{name}' not stored. Run: powershell -File ~/.secrets/secret.ps1 set {name}"
-        )
+        return None
     enc = base64.b64decode(f.read_text().strip())
     blob_in = _BLOB(len(enc), ctypes.cast(ctypes.c_char_p(enc), ctypes.POINTER(ctypes.c_char)))
     blob_out = _BLOB()
@@ -255,14 +290,7 @@ def dpapi_get(name: str) -> str:
         ctypes.windll.kernel32.LocalFree(blob_out.pbData)
 
 
-def dpapi_get_opt(name: str) -> str | None:
-    try:
-        return dpapi_get(name)
-    except FileNotFoundError:
-        return None
-
-
-def dpapi_set(name: str, value: str) -> None:
+def _dpapi_set(name: str, value: str) -> None:
     data = value.encode("utf-8")
     blob_in = _BLOB(len(data), ctypes.cast(ctypes.c_char_p(data), ctypes.POINTER(ctypes.c_char)))
     blob_out = _BLOB()
@@ -274,7 +302,62 @@ def dpapi_set(name: str, value: str) -> None:
         enc = ctypes.string_at(blob_out.pbData, blob_out.cbData)
     finally:
         ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     (SECRETS_DIR / f"{name}.dpapi").write_text(base64.b64encode(enc).decode("ascii"))
+
+
+# --- macOS Keychain ---------------------------------------------------------
+def _keychain_get(name: str) -> str | None:
+    r = subprocess.run(
+        ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name, "-w"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    # Strip only the newline `security` appends — a password may legitimately begin
+    # or end with a space.
+    return r.stdout.rstrip("\n") or None
+
+
+def _keychain_set(name: str, value: str) -> None:
+    subprocess.run(
+        ["security", "add-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name,
+         "-U", "-w", value],
+        check=True, capture_output=True)
+
+
+# --- public interface -------------------------------------------------------
+def secret_get_opt(name: str) -> str | None:
+    """Read a secret from the active backend; None if it is not stored."""
+    if SECRETS_BACKEND == "dpapi":
+        return _dpapi_get(name)
+    if SECRETS_BACKEND == "keychain":
+        return _keychain_get(name)
+    if SECRETS_BACKEND == "env":
+        return os.environ.get(name) or None
+    if SECRETS_BACKEND == "none":
+        return None
+    raise ValueError(f"unknown secrets backend {SECRETS_BACKEND!r} "
+                     "(expected dpapi, keychain, env, none, or auto)")
+
+
+def secret_get(name: str) -> str:
+    v = secret_get_opt(name)
+    if v is None:
+        raise FileNotFoundError(
+            f"secret '{name}' not stored (backend '{SECRETS_BACKEND}'). "
+            f"Store it with: {_store_hint(name)}")
+    return v
+
+
+def secret_set(name: str, value: str) -> None:
+    if SECRETS_BACKEND == "dpapi":
+        return _dpapi_set(name, value)
+    if SECRETS_BACKEND == "keychain":
+        return _keychain_set(name, value)
+    # 'env' and 'none' have nowhere to persist to. Session cookies simply do not
+    # survive across runs, which costs an extra login rather than failing the run.
+    print(f"[secrets] backend '{SECRETS_BACKEND}' cannot persist '{name}'; skipping",
+          file=sys.stderr)
 
 
 # --- captcha OCR ----------------------------------------------------------
@@ -391,6 +474,31 @@ def _warn_if_blocked(status: str) -> None:
 
 
 # --- watchdog (bounded failure instead of an unbounded hang) --------------
+def _posix_kill_descendants(pid: int) -> None:
+    """Depth-first SIGKILL of everything below `pid` — the POSIX analogue of
+    `taskkill /T /F`.
+
+    Deliberately NOT os.killpg: this process usually shares its process group with the
+    interactive shell that launched it, so killing the group would take the user's
+    terminal down with it.
+    """
+    try:
+        out = subprocess.run(["pgrep", "-P", str(pid)],
+                             capture_output=True, text=True, timeout=10).stdout.split()
+    except Exception:
+        return
+    for child in out:
+        try:
+            cpid = int(child)
+        except ValueError:
+            continue
+        _posix_kill_descendants(cpid)
+        try:
+            os.kill(cpid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
 def _kill_own_tree(code: int) -> None:
     """Exit, taking any spawned chromium with us. A bare os._exit orphans the browser
     (leaked RAM); `timeout`/SIGTERM from a caller has the same flaw — it kills the
@@ -419,8 +527,11 @@ def _kill_own_tree(code: int) -> None:
                     pass
         except Exception:
             try:
-                subprocess.run(["taskkill", "/PID", str(os.getpid()), "/T", "/F"],
-                               capture_output=True, timeout=20)
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/PID", str(os.getpid()), "/T", "/F"],
+                                   capture_output=True, timeout=20)
+                else:
+                    _posix_kill_descendants(os.getpid())
             except Exception:
                 pass
     finally:
@@ -442,12 +553,20 @@ def _arm_watchdog(label: str, seconds: int = WATCHDOG_S) -> threading.Timer:
 
 # --- single-instance lock (the chromium profile is exclusive) -------------
 def _pid_alive(pid: int) -> bool:
-    SYNCHRONIZE = 0x00100000
-    h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-    if h:
-        ctypes.windll.kernel32.CloseHandle(h)
-        return True
-    return False
+    if sys.platform == "win32":
+        SYNCHRONIZE = 0x00100000
+        h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+        if h:
+            ctypes.windll.kernel32.CloseHandle(h)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)          # signal 0 = existence check, no signal delivered
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True              # alive, just owned by another user
+    return True
 
 
 def _lock_holder() -> dict | None:
@@ -584,7 +703,7 @@ def save_session(ctx) -> None:
     for c in ctx.cookies():
         want = PERSIST_COOKIES.get(c["name"])
         if want and c["domain"] == want:
-            dpapi_set(f"LIB_COOKIE_{c['name'].upper().replace('-', '_')}", c["value"])
+            secret_set(f"LIB_COOKIE_{c['name'].upper().replace('-', '_')}", c["value"])
             saved.append(c["name"])
     print(f"[session] persisted cookies: {saved}", file=sys.stderr)
 
@@ -594,7 +713,7 @@ def restore_session(ctx) -> bool:
     for name, domain in PERSIST_COOKIES.items():
         if not domain:
             continue
-        val = dpapi_get_opt(f"LIB_COOKIE_{name.upper().replace('-', '_')}")
+        val = secret_get_opt(f"LIB_COOKIE_{name.upper().replace('-', '_')}")
         if val:
             cookies.append({
                 "name": name, "value": val, "domain": domain, "path": "/",
@@ -638,8 +757,8 @@ def _login_submit_here(page) -> bool:
     leave the `auth.captcha_*` config keys blank and this degrades to plain fill+submit —
     which is exactly the EZproxy flow.
     """
-    user = dpapi_get("LIB_USER")
-    pw = dpapi_get("LIB_PASS")
+    user = secret_get("LIB_USER")
+    pw = secret_get("LIB_PASS")
     for attempt in range(1, CAPTCHA_MAX_TRIES + 1):
         if page.locator(PASS_SEL).count() == 0:
             return True

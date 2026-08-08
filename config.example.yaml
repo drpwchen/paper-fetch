@@ -72,6 +72,19 @@ auth:
   #     sessionid: "gate.your-university.edu"
   #     proxy-auth: ".your-university.edu"
 
+secrets:
+  # Where LIB_USER / LIB_PASS and the persisted session cookies are kept.
+  #   auto      — dpapi on Windows, keychain on macOS, env elsewhere  [default]
+  #   dpapi     — Windows DPAPI store (~/.secrets/secret.ps1)
+  #   keychain  — macOS login Keychain (service name "paper-fetch"):
+  #                 security add-generic-password -s paper-fetch -a LIB_USER -U -w
+  #               Put -w LAST so it prompts; otherwise the password lands in shell
+  #               history and in `ps` output.
+  #   env       — plain environment variables. Cannot persist session cookies, so
+  #               every run logs in again.
+  # The SECRETS_BACKEND environment variable overrides this file.
+  backend: "auto"
+
 rate:
   # Courtesy delay (seconds) between proxy requests. 0 DISABLES it and prints a warning.
   # Systematic/bulk download can get your whole institution's IP blocked — keep this on.
