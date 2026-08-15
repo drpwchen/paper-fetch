@@ -5,6 +5,43 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-08-15
+
+Chinese-language sources. Everything so far started from a DOI; Taiwanese theses have none,
+and Airiti's articles are addressed by the platform's own DocID. Two new entry points, both
+verified end to end against live records.
+
+### Added
+- **`ndltd.py` — 臺灣博碩士論文知識加值系統 (ndltd.ncl.edu.tw).** `login` / `check` /
+  `search` / `fetch`, by title, author or thesis ID, with `--json` envelopes
+  (`ndltd.search/1`, `ndltd.fetch/1`). Full texts there are free; the work was in the site's
+  machinery, and all four parts of it fail *silently*: a load-shedding captcha gate that can
+  replace any navigation (it looks exactly like a session expiry — this is what defeated an
+  earlier attempt at the site); a path-borne `ccd=` session token that makes hand-built URLs
+  dead on arrival; a login bound to that token unless 保持我的登入狀態 is ticked; and a
+  copyright-declaration popup carrying its own captcha, where clicking 我同意 unsolved only
+  fires a JS alert. Downloads arrive as a WinZip of per-chapter PDFs, which the module merges
+  in order into a single verified PDF (`--keep-zip` also keeps the original container).
+- **`airiti.py` — 華藝線上圖書館.** `fetch` by DocID or DOI, plus a browser-rendered `search`
+  (Airiti's result list is client-side, so a plain HTTP GET returns an empty shell). Uses the
+  institutional proxy and existing session cookies.
+- **[docs/chinese-sources.md](docs/chinese-sources.md)** — both platforms, their traps, and
+  the entitlement rule below.
+- `pymupdf` is now a declared dependency (chapter merge, page-count verification).
+
+### Fixed
+- **Airiti articles previously written off as "not subscribed" download fine.** Two bugs
+  stacked: the cookie-consent banner cannot be dismissed with a normal click (Playwright sees
+  the span as not visible, the exception gets swallowed, and the still-open banner then eats
+  every later click with no error and no network request), and the PDF arrives as a **blob
+  download** rather than a readable response body, so watching response bodies sees nothing.
+  Fixed with an in-page JS dismiss plus download-event capture; an article that had been
+  declared unavailable now downloads byte-identical to a manual download.
+- Documented the matching entitlement rule: `holdings.py` is built from the A–Z e-journal
+  list and Airiti is normally a **database-level** subscription, so a journal's absence from
+  holdings says nothing about Airiti access. More generally — **"my automation cannot get it"
+  is not evidence about your institution's entitlements.**
+
 ## [1.2.0] — 2026-08-08
 
 Runs on macOS and Linux. The institutional-proxy layer was Windows-only in three

@@ -50,6 +50,11 @@ DOI
 
 Layer 1 works out of the box for anyone. Layers 2–3 are where the work is.
 
+Two Taiwanese platforms sit **outside** this ladder, because their items are not addressed by
+DOI at all: Taiwanese theses (NDLTD) and Chinese-language journal articles (Airiti). They get
+their own entry points — `ndltd.py` and `airiti.py` — documented in
+[docs/chinese-sources.md](docs/chinese-sources.md).
+
 Two rules worth stealing:
 - **Validate `%PDF` magic bytes**, never trust `Content-Type`. Paywalls and Cloudflare love
   to return `200 text/html` that *looks* like a PDF response but isn't.
@@ -156,6 +161,11 @@ python library_session.py check                              # proxy layer (afte
 python library_session.py fetch 10.1002/xxxxx out.pdf
 python library_session.py stats                              # rate / block analysis
 python library_session.py routes                             # per-route scorecard + holdings gaps
+
+# Chinese-language sources (no DOI) — see docs/chinese-sources.md
+python ndltd.py search "居家復能" --field ti                  # Taiwanese theses; 📄 = full text
+python ndltd.py fetch 109CGU05712004 thesis.pdf              # chapters merged into one PDF
+python airiti.py fetch 10.6288/TJPH.202204_41\(2\).110135 article.pdf
 ```
 
 `examples/example-note.md` shows the intended Zotero + Obsidian workflow around it.
