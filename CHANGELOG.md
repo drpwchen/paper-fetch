@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-08-19
+
+Content-level PDF validation ([#2](https://github.com/drpwchen/paper-fetch/issues/2)).
+`is_pdf()` only checked magic bytes, so for *in press* Elsevier DOIs the TDM API's one-page
+cover sheet was accepted as full text and the route ladder stopped — worse than a plain
+failure, because callers then believe they hold the article. File size does not discriminate
+(an 876 KB cover was observed next to a 259 KB one); only page count plus extracted-text
+volume does.
+
+### Fixed
+- **Every route's PDF now passes a content gate** (PyMuPDF; skipped with a warning if it is
+  not installed): multi-page documents pass unconditionally, so scanned/image-only PDFs are
+  unaffected. A single-page document is rejected when it carries a **"Journal Pre-proof"**
+  or **"ARTICLE IN PRESS"** marker — the two in-press cover variants the Elsevier TDM API
+  was observed to serve (the second contains title/authors/abstract and ~4k characters, so
+  a bare character threshold misses it) — or when it has fewer than 3000 extracted
+  characters. A rejected response no longer ends the run: the ladder keeps walking.
+- Rejected-but-valid PDFs are kept at `<out>.partial` (still useful as a metadata source)
+  and reported via new envelope fields `partial_path` / `reject_reason`.
+- **Failure messages now distinguish three cases** instead of one generic "possibly
+  paywalled" line: content rejected (in press — retry later or go institutional), Unpaywall
+  `is_oa:true` with every candidate URL dead (`oa_claimed` in the envelope; the full text
+  likely exists), and the genuine paywall/Cloudflare case.
+
 ## [1.3.0] — 2026-08-15
 
 Chinese-language sources. Everything so far started from a DOI; Taiwanese theses have none,

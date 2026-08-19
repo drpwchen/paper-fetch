@@ -9,7 +9,10 @@
                                                    # （診斷全走 stderr），typed exit codes
 
 Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用法錯誤 · 2=自動路線全敗
-JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?, elapsed_s}
+JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
+                partial_path?, reject_reason?, oa_claimed?, elapsed_s}
+「有效 PDF」＝ magic bytes ＋內容驗證（頁數/抽出字量；擋 in-press 的 1 頁 pre-proof 封面）。
+未過驗證的回應存 <out>.partial、reject_reason 進 envelope，階梯繼續往下走。
 
 路線（依 DOI 前綴自動選，失敗逐階 fallback，最後印機構 SFX 連結）:
     10.1016            → Elsevier TDM Article Retrieval API   (key: ELSEVIER_TDM_KEY)
@@ -70,6 +73,58 @@ def is_pdf(content: bytes) -> bool:
     return len(content) > 1000 and content[:4] == b"%PDF"
 
 
+# Content-level gate (issue #2): for in-press DOIs the Elsevier TDM API answers with a
+# 1-page "Journal Pre-proof" cover sheet — a valid, sometimes large %PDF (876 KB observed,
+# bigger than plenty of genuine papers) that has no article body. File size cannot
+# discriminate; only page count + extracted-text volume can. Page count is checked first
+# so scanned/image-only PDFs (multi-page, little extractable text) still pass.
+_LAST_REJECT = None  # (content, reason) of the most recent gate rejection → .partial
+_OA_CLAIMED = False  # Unpaywall said is_oa=true — if every route still fails, say so:
+                     # "full text likely exists, routes are broken/in-press" is different
+                     # follow-up from "paywalled" (issue #2, second observation)
+
+
+def pdf_gate(content: bytes):
+    """回 (ok, reason)。多頁一律放行；單頁才看 pre-proof 標記與抽出字量。"""
+    try:
+        import fitz  # PyMuPDF — requirements 有列，缺了不擋路只警告
+    except ImportError:
+        print("  ⚠ PyMuPDF 未安裝 → 跳過內容驗證（pip install pymupdf）")
+        return True, None
+    try:
+        with fitz.open(stream=content, filetype="pdf") as doc:
+            pages = doc.page_count
+            if pages >= 2:
+                return True, None
+            text = "".join(p.get_text() for p in doc)
+    except Exception as e:
+        return False, f"PDF 解析失敗（{e}）"
+    low = text.lower()
+    # Two in-press cover variants observed from the Elsevier TDM API (issue #2):
+    # a "Journal Pre-proof" disclaimer sheet (~2k chars) and an "ARTICLE IN PRESS"
+    # first-page preview (~4k chars — title/authors/abstract, so a bare char
+    # threshold misses it). Either marker on a single-page doc = not the article.
+    if "journal pre-proof" in low:
+        return False, f"1 頁 Journal Pre-proof 封面（{len(text)} 字元）— 出版社尚無全文可給"
+    if "article in press" in low:
+        return False, f"1 頁 ARTICLE IN PRESS 預覽（{len(text)} 字元）— 出版社尚無全文可給"
+    if len(text) < 3000:
+        return False, f"單頁且僅 {len(text)} 字元 — 疑似封面/摘要頁"
+    return True, None
+
+
+def valid_pdf(content: bytes) -> bool:
+    """magic bytes ＋內容驗證。未過驗證＝當作沒抓到，讓階梯繼續走，退件留給 .partial。"""
+    global _LAST_REJECT
+    if not is_pdf(content):
+        return False
+    ok, reason = pdf_gate(content)
+    if not ok:
+        print(f"  ✗ 內容驗證未過：{reason} → 續走下一路線")
+        _LAST_REJECT = (content, reason)
+    return ok
+
+
 # ── 各路線：成功回 bytes(PDF)，失敗回 None（並印診斷，絕不印 key/header）──────────
 
 def route_elsevier(doi):
@@ -92,7 +147,7 @@ def route_elsevier(doi):
         print(f"  Elsevier 連線失敗: {e}")
         return None
     print(f"  Elsevier TDM: HTTP {r.status_code} · {len(r.content)} bytes")
-    return r.content if r.status_code == 200 and is_pdf(r.content) else None
+    return r.content if r.status_code == 200 and valid_pdf(r.content) else None
 
 
 def route_wiley(doi):
@@ -111,7 +166,7 @@ def route_wiley(doi):
         print(f"  Wiley 連線失敗: {e}")
         return None
     print(f"  Wiley TDM: HTTP {r.status_code} · {len(r.content)} bytes")
-    return r.content if r.status_code == 200 and is_pdf(r.content) else None
+    return r.content if r.status_code == 200 and valid_pdf(r.content) else None
 
 
 def route_springer(doi):
@@ -240,6 +295,9 @@ def route_unpaywall(doi):
                              headers={"User-Agent": UA})
             if r.status_code == 200:
                 j = r.json() or {}
+                if j.get("is_oa"):
+                    global _OA_CLAIMED
+                    _OA_CLAIMED = True
                 locs = []
                 if j.get("best_oa_location"):
                     locs.append(j["best_oa_location"])
@@ -302,7 +360,7 @@ def _grab(url, referer=None):
         print(f"  下載失敗 {url}: {e}")
         return None
     print(f"  GET {url} → HTTP {r.status_code} · {len(r.content)} bytes")
-    return r.content if r.status_code == 200 and is_pdf(r.content) else None
+    return r.content if r.status_code == 200 and valid_pdf(r.content) else None
 
 
 def _grab_via_landing(url):
@@ -313,7 +371,7 @@ def _grab_via_landing(url):
     except Exception as e:
         print(f"  落地頁失敗 {url}: {e}")
         return None
-    if r.status_code == 200 and is_pdf(r.content):
+    if r.status_code == 200 and valid_pdf(r.content):
         print(f"  落地頁本身即 PDF: {url} · {len(r.content)} bytes")
         return r.content
     if "html" not in r.headers.get("content-type", "").lower():
@@ -373,7 +431,22 @@ def run_ladder(doi, out):
 
     # 全部失敗 → 機構 SFX 連結
     resolver = SFX_BASE.format(doi=doi) if SFX_BASE else None
-    print("\n✗ 自動路線皆未取得 PDF（可能付費牆或 Cloudflare）。")
+    partial_path = reject_reason = None
+    if _LAST_REJECT:
+        rejected, reject_reason = _LAST_REJECT
+        if out:
+            partial = out.with_name(out.name + ".partial")
+            partial.write_bytes(rejected)
+            partial_path = str(partial)
+        print(f"\n✗ 有路線回應但內容未過驗證：{reject_reason}")
+        if partial_path:
+            print(f"  退件已留存（標題/作者 metadata 仍可用）→ {partial_path}")
+        print("  多半是文章 in-press、出版社尚未釋出正式全文 → 走機構管道或過幾天重試。")
+    elif _OA_CLAIMED:
+        print("\n✗ Unpaywall 標記 is_oa=true，但所有自動候選 URL 皆失效（in-press 常見）。")
+        print("  全文多半存在 → 走機構 resolver 或稍後重試，而非付費牆。")
+    else:
+        print("\n✗ 自動路線皆未取得 PDF（可能付費牆或 Cloudflare）。")
     if resolver:
         print("  改走機構圖書館（已登入機構 session 後）:")
         print(f"  {resolver}")
@@ -383,6 +456,8 @@ def run_ladder(doi, out):
           f"{doi}?download=true（機構 IP/session 下）")
     return {"schema": 1, "doi": doi, "ok": False, "route": None, "tried": tried,
             "bytes": 0, "sha256": None, "path": None, "resolver_url": resolver,
+            "partial_path": partial_path, "reject_reason": reject_reason,
+            "oa_claimed": _OA_CLAIMED,
             "elapsed_s": round(time.time() - started, 1)}
 
 
