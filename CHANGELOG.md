@@ -28,6 +28,18 @@ volume does.
   paywalled" line: content rejected (in press — retry later or go institutional), Unpaywall
   `is_oa:true` with every candidate URL dead (`oa_claimed` in the envelope; the full text
   likely exists), and the genuine paywall/Cloudflare case.
+- **`library_session.py`: Springer/BMC in-press articles now download.** The canonical
+  `/content/pdf/{doi}.pdf` 404s while an article is in press, and `citation_pdf_url`
+  still advertises that dead URL — but the landing page's own Download button serves an
+  Article-in-Press proof at `{doi}_reference.pdf` (verified: a DOI whose every automatic
+  route 404'd delivered a 70-page proof). tpl routes now accept optional `alt_paths`
+  tried in order after the primary template; the Springer and BMC entries carry the
+  `_reference.pdf` fallback.
+- **`library_session.py`: a SweetAlert2 announcement modal on the gate's login page no
+  longer wedges the run.** The modal's backdrop intercepts every pointer event, so the
+  login submit click retried until the watchdog killed the browser — before anything
+  reached the access log. `_login_submit_here` now confirms or removes such overlays
+  (`_dismiss_overlays`) before submitting.
 
 ## [1.3.0] — 2026-08-15
 

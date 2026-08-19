@@ -194,8 +194,15 @@ ROUTES: dict[str, dict] = {
     # --- tpl (one-step template) ---
     "10.1002": {"kind": "tpl", "host": "onlinelibrary.wiley.com", "path": "/doi/pdfdirect/{doi}?download=true"},  # Wiley (incl. Cochrane 10.1002/14651858)
     "10.1111": {"kind": "tpl", "host": "onlinelibrary.wiley.com", "path": "/doi/pdfdirect/{doi}?download=true"},  # Wiley
-    "10.1007": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf"},              # Springer
-    "10.1186": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf"},              # BMC ⚠ real PDF lives on per-journal *.biomedcentral.com, often 404
+    # Springer/BMC: the canonical /content/pdf URL 404s while an article is IN PRESS,
+    # but the landing page's Download button serves an Article-in-Press proof at
+    # {doi}_reference.pdf (observed 2026-08-19: canonical 404, _reference.pdf = 70-page
+    # proof). citation_pdf_url still advertises the 404 canonical URL, so a meta route
+    # would not find it either — hence the explicit alt path.
+    "10.1007": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf",
+                "alt_paths": ["/content/pdf/{doi}_reference.pdf"]},                                               # Springer
+    "10.1186": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf",
+                "alt_paths": ["/content/pdf/{doi}_reference.pdf"]},                                               # BMC ⚠ real PDF lives on per-journal *.biomedcentral.com, often 404
     "10.1056": {"kind": "tpl", "host": "www.nejm.org",            "path": "/doi/pdf/{doi}"},                      # NEJM ✅
     "10.1177": {"kind": "tpl", "host": "journals.sagepub.com",    "path": "/doi/pdf/{doi}?download=true"},        # Sage ✅ (OnlineFirst may sit outside coverage → 403, not a route bug)
     "10.1080": {"kind": "tpl", "host": "www.tandfonline.com",     "path": "/doi/pdf/{doi}?download=true"},        # Taylor & Francis ✅
@@ -776,6 +783,30 @@ def is_logged_in(page) -> bool:
     return page.locator(PASS_SEL).count() == 0
 
 
+def _dismiss_overlays(page) -> None:
+    """Dismiss a SweetAlert2 announcement modal if one covers the page.
+
+    Some gates decorate their login page with a swal2 popup (site news, maintenance
+    notices) whose backdrop intercepts every pointer event — the submit click then
+    retries until the watchdog kills the run, before anything reaches the access log
+    (first seen 2026-08-19 on a login-form submit). The modal is informational only:
+    confirm-click it when a button exists, otherwise remove it outright."""
+    try:
+        if page.locator(".swal2-container").count() == 0:
+            return
+        btn = page.locator(".swal2-confirm")
+        if btn.count():
+            btn.first.click(timeout=3000)
+            page.wait_for_timeout(300)
+        if page.locator(".swal2-container").count():
+            page.evaluate(
+                "document.querySelectorAll('.swal2-container').forEach(e => e.remove());"
+                "document.body.classList.remove('swal2-shown', 'swal2-height-auto')")
+        print("[login] dismissed a swal2 overlay", file=sys.stderr)
+    except Exception as e:
+        print(f"[login] overlay dismiss skipped: {e}", file=sys.stderr)
+
+
 def _login_submit_here(page) -> bool:
     """Fill + submit the login form on the CURRENT page (config-driven selectors).
 
@@ -796,6 +827,7 @@ def _login_submit_here(page) -> bool:
     for attempt in range(1, CAPTCHA_MAX_TRIES + 1):
         if page.locator(PASS_SEL).count() == 0:
             return True
+        _dismiss_overlays(page)
         sp = urlsplit(page.url)   # recompute — a failed submit may have moved hosts
         origin = f"{sp.scheme}://{sp.netloc}"
         if CAPTCHA_SEL:
@@ -979,24 +1011,32 @@ def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> bool:
             except Exception:
                 pass
 
-    try:
-        resp = page.request.get(url, timeout=NAV_TIMEOUT_MS)
-        body = resp.body()
-    except Exception as e:
-        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": phase,
-              "status": _classify_exc(e), "note": repr(e)[:100]})
-        return False
-
-    status = _classify(resp, body)
-    _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": phase, "status": status,
-          "http": resp.status, "bytes": len(body),
-          "cf_ray": resp.headers.get("cf-ray"), "cf_mitigated": resp.headers.get("cf-mitigated")})
-    if status == "pdf":
-        out.write_bytes(body)
-        print(f"[proxy] OK ({phase}) -> {out} ({len(body)} bytes)", file=sys.stderr)
-        return True
-    _warn_if_blocked(status)
-    print(f"[proxy] {status} ({phase}, http {resp.status}, {len(body)}B)", file=sys.stderr)
+    # Primary URL first, then any alt_paths (e.g. Springer's in-press _reference.pdf).
+    urls = [url] + [f"https://{_proxy_host(route['host'])}{p.format(doi=doi)}"
+                    for p in route.get("alt_paths", [])]
+    status = None
+    for u in urls:
+        try:
+            resp = page.request.get(u, timeout=NAV_TIMEOUT_MS)
+            body = resp.body()
+        except Exception as e:
+            _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": phase,
+                  "status": _classify_exc(e), "note": repr(e)[:100]})
+            return False
+        status = _classify(resp, body)
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": phase, "status": status,
+              "http": resp.status, "bytes": len(body),
+              "alt": (u != url) or None,
+              "cf_ray": resp.headers.get("cf-ray"), "cf_mitigated": resp.headers.get("cf-mitigated")})
+        if status == "pdf":
+            out.write_bytes(body)
+            print(f"[proxy] OK ({phase}) -> {out} ({len(body)} bytes)"
+                  + ("（alt path — 可能是 in-press proof 版）" if u != url else ""),
+                  file=sys.stderr)
+            return True
+        _warn_if_blocked(status)
+        print(f"[proxy] {status} ({phase}, http {resp.status}, {len(body)}B)"
+              + (f" — trying alt path" if u != urls[-1] else ""), file=sys.stderr)
     return False
 
 
