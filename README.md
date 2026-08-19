@@ -68,8 +68,8 @@ Two rules worth stealing:
 The point of this repo. Each publisher exposes a different shape; these are the ones mapped
 and verified against live articles.
 
-All four shapes live in one dispatch table — `ROUTES` in `library_session.py`, keyed by DOI
-prefix with a `kind` of `tpl` / `meta` / `lww` — and as of v1.0 every one of them ships
+All five shapes live in one dispatch table — `ROUTES` in `library_session.py`, keyed by DOI
+prefix with a `kind` of `tpl` / `meta` / `lww` / `ck` — and every one of them ships
 working code:
 
 | Shape | How it works | DOI prefixes |
@@ -78,8 +78,11 @@ working code:
 | **citation-meta** (`kind: meta`) | resolver → article HTML's `<meta name="citation_pdf_url">` → fetch with Referer. Headless. | `10.1001` JAMA · `10.1093` Oxford · `10.1542` Pediatrics · `10.1183` ERJ · `10.3171` J Neurosurg · `10.1038` Nature |
 | **citation-meta + headful nav** (`kind: meta, nav: true`) | same, but the resolver runs as a real headful navigation to clear a Cloudflare challenge | `10.1136` BMJ · `10.3174` AJNR · `10.2967` J Nucl Med |
 | **signed-URL** (`kind: lww`) | multi-step walk to a signed PDF URL: resolver → scrape article number → viewer HTML → signed `pdfUrl` with the right Referer chain, plus an Ovid-OCE fallback for ahead-of-print articles and concurrent-licence-seat (E3) back-off | `10.1097`/`10.1161`/`10.1213`/`10.2215` LWW/Ovid |
+| **SPA bootstrap** (`kind: ck`) | headful navigation to ClinicalKey's `playBy/doi` boots the SPA (headless hangs on its splash — a headless artifact, not a proxy limitation), an "organization" modal is auto-answered (`clinicalkey.institution_match`), then the watermarked-PDF service endpoint is fetched from the same context; the PII in that URL comes from CrossRef `alternative-id`, no scraping | `10.1016` Elsevier via ClinicalKey |
 
-`10.1016` Elsevier goes through the TDM API in `paper_fetch.py`, never the proxy.
+`10.1016` Elsevier tries the TDM API in `paper_fetch.py` first; the `ck` route is the
+fallback for what TDM cannot serve — *in press* articles (TDM returns a cover sheet the
+content gate rejects) and ClinicalKey-only titles.
 
 **Adding a new publisher? Reach for the `citation_pdf_url` route first.** Many sites with no
 DOI→PDF template still advertise the exact PDF URL in a `<meta name="citation_pdf_url">` tag on

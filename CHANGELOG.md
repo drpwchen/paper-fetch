@@ -5,6 +5,37 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-08-19
+
+ClinicalKey proxy route (`ck`) — closes the gap [#2](https://github.com/drpwchen/paper-fetch/issues/2)
+left open: for *in press* Elsevier articles the TDM API serves only a cover sheet (now
+rejected by the 1.3.1 content gate), and at libraries whose Elsevier access lives in
+ClinicalKey rather than ScienceDirect, the ladder previously ended there.
+
+### Added
+- **`ck` route for ClinicalKey** (`10.1016` now dispatches to it after the TDM layer):
+  navigate the remote-auth gate to CK's `content/playBy/doi/{doi}`, let the SPA bootstrap,
+  then fetch `/service/content/pdf/watermarked/1-s2.0-{PII}.pdf` from the same context.
+  The PII comes from CrossRef `alternative-id` — no SPA scraping. Verified end-to-end on
+  two in-press APMR RCTs (10 pp/47k chars and 28 pp/55k chars, both passing the content
+  gate; the TDM API had served covers for both).
+- CK's "Choose organization" modal is handled automatically: options are buttons (not
+  radio inputs), picked by new config `clinicalkey.institution_match` (regex; documented
+  in `config.example.yaml`). A single option is picked without config; several unmatched
+  options fail with the list printed. The modal can reappear on every run — the route
+  handles it each time.
+- New access-log statuses for the route: `no_pii`, `institution_unmatched`, `gate_reject`,
+  `boot_timeout`.
+
+### Fixed
+- **"ClinicalKey through a rewriting proxy cannot load" was a headless artifact.** The CK
+  SPA bootstraps fine in a *headful* context (same failure class as the Ovid "please
+  wait" interstitial); headless hangs on the splash screen forever. The `ck` route is
+  headful accordingly. While the SPA boots, the PDF endpoint answers HTTP 902/JSON or
+  500 — the route polls (default 120 s, `PAPERFETCH_CK_BOOT_S`) instead of giving up.
+- A synthetic click on CK's own download link does not trigger a download; fetching the
+  URL from the page's context does. The route never relies on download events.
+
 ## [1.3.1] — 2026-08-19
 
 Content-level PDF validation ([#2](https://github.com/drpwchen/paper-fetch/issues/2)).

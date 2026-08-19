@@ -94,3 +94,11 @@ rate:
   # Your email/handle — sent as a contact User-Agent on direct API routes so publishers
   # can distinguish individual research use from systematic scraping.
   contact: ""
+
+# --- ClinicalKey (`ck` route) — only relevant if your library subscribes ClinicalKey ---
+# institution_match: case-insensitive regex tested against the option texts of CK's
+# "Choose organization" modal (it can reappear on every run — the route handles it
+# each time). With exactly one option the route picks it automatically and this can
+# stay unset.
+#clinicalkey:
+#  institution_match: "IP_"

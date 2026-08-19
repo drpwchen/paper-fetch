@@ -96,7 +96,7 @@ Try in order; each route falls through to the next, ending at the SFX institutio
 | DOI prefix | Publisher | Route |
 |---|---|---|
 | OA (any) | — | Zotero **Find Available PDF** or **Zotadata** right-click → attaches in place ✅ |
-| 10.1016 | Elsevier / ScienceDirect | `paper_fetch.py` → Elsevier TDM (`ELSEVIER_TDM_KEY`) |
+| 10.1016 | Elsevier / ScienceDirect | `paper_fetch.py` → Elsevier TDM (`ELSEVIER_TDM_KEY`); when TDM serves only an in-press cover, falls through to the ClinicalKey `ck` route (headful window, organization modal auto-answered — v1.4.0) |
 | 10.1002 / 10.1111 | **Wiley** | `paper_fetch.py` → Wiley TDM (`WILEY_TDM_TOKEN`) |
 | 10.1007 / 10.1186 | Springer / BMC | `paper_fetch.py` → OA content/pdf (Springer API key optional) |
 | anything left | — | `paper_fetch.py` → Unpaywall direct |

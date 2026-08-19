@@ -116,6 +116,13 @@ REMOTE_AUTH_DOMAIN = urlsplit(REMOTE_AUTH).netloc if REMOTE_AUTH else ""
 PROXY_SUFFIX = CFG["institution"]["proxy_suffix"]
 SFX = CFG["institution"]["sfx_base"]
 
+# ClinicalKey knobs (config.yaml `clinicalkey:`) — used by the `ck` route (_ck_pdf).
+# institution_match: regex picked against the "Choose organization" modal's button texts
+# the FIRST time this profile enters CK (the choice is then remembered by the profile).
+CK_INSTITUTION = ((CFG.get("clinicalkey") or {}).get("institution_match") or "")
+CK_BOOT_TIMEOUT_S = int(os.environ.get("PAPERFETCH_CK_BOOT_S", "120"))  # SPA bootstrap wait
+CK_POLL_S = 10
+
 # Form-login knobs (config.yaml `auth:`) — see docs/library-setup.md for the presets.
 AUTH = CFG["auth"]
 AUTH_FAMILY = (AUTH.get("family") or "form").lower()
@@ -227,8 +234,14 @@ ROUTES: dict[str, dict] = {
     "10.1161": {"kind": "lww"},   # AHA (Circulation / Stroke)
     "10.1213": {"kind": "lww"},   # A&A / A&A Practice
     "10.2215": {"kind": "lww"},   # CJASN (moved to LWW; goes through the Ovid OCE branch)
+    # --- ck (ClinicalKey, headful — see _ck_pdf for why) ---
+    # 10.1016 Elsevier: paper_fetch's TDM API still goes first (layer 1) and covers most
+    # articles. This route is the fallback for what TDM cannot serve: in-press articles
+    # (TDM returns a cover sheet that pdf_gate rejects) and ClinicalKey-only titles.
+    # ScienceDirect-via-proxy is NOT an equivalent fallback — SD and CK are separate
+    # subscriptions (the reference library holds 5 SD journals vs 953 CK journals).
+    "10.1016": {"kind": "ck"},
     # --- no route, with the reason established (don't re-probe blindly) ---
-    # 10.1016 Elsevier → paper_fetch.py's TDM API takes it first (no proxy involved).
     # Genuine dead ends at the reference library, kept as examples of WHY a prefix can be
     # absent (check your own holdings before copying these verdicts):
     #   10.2519 JOSPT — no online entitlement (full-text page = abstract + paywall).
@@ -1572,6 +1585,155 @@ def _lww_ovid_pdf(page, doi: str, out: Path) -> str:
     return "fail"
 
 
+def _crossref_pii(doi: str) -> str | None:
+    """DOI → Elsevier PII via CrossRef `alternative-id` (no browser, no auth needed).
+
+    ClinicalKey's PDF endpoint is keyed by PII, not DOI. CrossRef carries the PII of an
+    Elsevier DOI in `alternative-id` (verified on in-press APMR articles 2026-08-19), so
+    the URL can be built without scraping the CK SPA."""
+    import urllib.request
+    from urllib.parse import quote
+    mail = CFG.get("unpaywall_email") or "unknown"
+    req = urllib.request.Request(
+        f"https://api.crossref.org/works/{quote(doi, safe='')}",
+        headers={"User-Agent": f"paper-fetch (mailto:{mail})"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            msg = json.loads(r.read())["message"]
+    except Exception as e:
+        print(f"[ck] CrossRef lookup failed ({repr(e)[:80]})", file=sys.stderr)
+        return None
+    for aid in msg.get("alternative-id") or []:
+        cand = re.sub(r"[^A-Za-z0-9X]", "", aid)
+        if re.fullmatch(r"[SB][0-9]{15}[0-9X]", cand):
+            return cand
+    return None
+
+
+def _ck_pdf(page, doi: str, out: Path) -> str:
+    """ClinicalKey route (HEADFUL): gate login → CK `playBy/doi` → watermarked-PDF service.
+    Returns "pdf" / "auth" / "fail".
+
+    Shape of the route (established 2026-08-19, issue #2 postmortem):
+    - The CK SPA DOES load through the rewriting proxy — but only in a headful context.
+      Headless hangs on the「页面加载中」splash forever; the earlier "CK over the proxy is
+      a dead end" verdict was a headless artifact (same class as the LWW 請稍候 case).
+    - The PDF endpoint needs CK's own session cookies, which only the SPA bootstrap sets;
+      with gate cookies alone it answers HTTP 902 + JSON. So: navigate once, let the SPA
+      boot, and poll the PDF endpoint from the same context (500s while booting are
+      normal — the second poll typically succeeds).
+    - Entering CK shows a "选择机构 / Choose organization" modal whose options are
+      `button.pseudo-label` elements (NOT radio inputs). Pick by config
+      `clinicalkey.institution_match`. Its "remember" box does NOT persist in this
+      profile (observed: the modal reappears every run) — the route just handles it
+      each time.
+    - A synthetic click on the SPA's own download link does NOT trigger a download —
+      fetch the PDF URL directly instead. PII for the URL comes from _crossref_pii.
+    """
+    prefix = doi.split("/")[0]
+    pii = _crossref_pii(doi)
+    if not pii:
+        print(f"[ck] no PII for {doi} (CrossRef alternative-id empty) — cannot build the "
+              "ClinicalKey PDF URL", file=sys.stderr)
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "ck",
+              "status": "no_pii"})
+        return "fail"
+    # Query string exactly as the CK UI's own download link builds it (verified working).
+    pdf_url = (f"https://{_proxy_host('www.clinicalkey.com')}"
+               f"/service/content/pdf/watermarked/1-s2.0-{pii}.pdf?locale=zh_CN&searchIndex=")
+    play = f"{REMOTE_AUTH}{LOGIN_PATH}?url=https://www.clinicalkey.com/content/playBy/doi/?v={doi}"
+    _throttle()
+    _mark(f"ck: goto playBy {doi}")
+    try:
+        page.goto(play, wait_until="commit", timeout=NAV_TIMEOUT_MS)
+    except Exception as e:
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "ck",
+              "status": _classify_exc(e), "note": repr(e)[:100]})
+        return "fail"
+    # Bounced onto the gate's login form? Complete it HERE — submitting on the bounced
+    # page is what performs the per-subdomain handshake (re-running login() is a no-op).
+    try:
+        page.wait_for_timeout(1500)
+        if page.locator(PASS_SEL).count() > 0 and not _login_submit_here(page):
+            return "auth"
+    except Exception:
+        pass
+    deadline = time.time() + CK_BOOT_TIMEOUT_S
+    tries = 0
+    while time.time() < deadline:
+        page.wait_for_timeout(CK_POLL_S * 1000)
+        tries += 1
+        # Institution-choice modal (first entry per profile only)
+        try:
+            if page.evaluate("!!document.querySelector('button.pseudo-label')"):
+                res = json.loads(page.evaluate(
+                    """(inst) => {
+                        const btns=[...document.querySelectorAll('button.pseudo-label')];
+                        const pick=inst?btns.find(b=>new RegExp(inst,'i').test(b.textContent))
+                                       :(btns.length===1?btns[0]:null);
+                        if(!pick) return JSON.stringify(
+                            {picked:null,options:btns.map(b=>b.textContent.trim().slice(0,90))});
+                        pick.click();
+                        const form=pick.closest('form')||document;
+                        const cont=[...form.querySelectorAll('button')]
+                            .find(b=>!b.classList.contains('pseudo-label')
+                                     &&/继续|繼續|continue/i.test(b.textContent))
+                            ||form.querySelector('button[type=submit]');
+                        if(cont)cont.click();
+                        return JSON.stringify({picked:pick.textContent.trim().slice(0,90),
+                                               cont:!!cont});
+                    }""", CK_INSTITUTION))
+                if res.get("picked"):
+                    print(f"[ck] institution picked: {res['picked']}", file=sys.stderr)
+                elif res.get("options"):
+                    print("[ck] institution modal has several options and "
+                          "`clinicalkey.institution_match` (config.yaml) matched none:",
+                          file=sys.stderr)
+                    for o in res["options"]:
+                        print(f"[ck]   · {o}", file=sys.stderr)
+                    _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "ck",
+                          "status": "institution_unmatched"})
+                    return "fail"
+        except Exception:
+            pass
+        try:
+            resp = page.request.get(pdf_url, timeout=45000)
+            body = resp.body()
+        except Exception as e:
+            _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "ck",
+                  "status": _classify_exc(e), "note": repr(e)[:100]})
+            continue
+        status = _classify(resp, body)
+        if status == "pdf":
+            try:
+                from paper_fetch import pdf_gate
+                ok, reason = pdf_gate(body)
+            except ImportError:
+                ok, reason = True, None
+            if not ok:
+                partial = out.with_suffix(out.suffix + ".partial")
+                partial.write_bytes(body)
+                print(f"[ck] 內容驗證未過：{reason} → 退件存 {partial}", file=sys.stderr)
+                _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "ck",
+                      "status": "gate_reject", "note": str(reason)[:100]})
+                return "fail"
+            out.write_bytes(body)
+            _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "ck",
+                  "status": "pdf", "http": resp.status, "bytes": len(body), "tries": tries})
+            print(f"[ck] OK -> {out} ({len(body)} bytes, probe {tries})", file=sys.stderr)
+            return "pdf"
+        if status == "auth_expired":
+            return "auth"
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "ck",
+              "status": status, "http": resp.status, "bytes": len(body), "tries": tries})
+        # HTTP 500 / 902-JSON while the SPA bootstraps — keep polling until the deadline.
+    print(f"[ck] CK session not ready within {CK_BOOT_TIMEOUT_S}s — the SPA only boots "
+          "HEADFUL; if this run was headless, that is the bug", file=sys.stderr)
+    _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "ck",
+          "status": "boot_timeout"})
+    return "fail"
+
+
 def _sfx_hint(doi: str) -> str:
     return f" SFX: {SFX.format(doi=doi)}" if SFX else ""
 
@@ -1582,6 +1744,7 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
 
     Headless is the default (patchright clears most CF). Two cases MUST be headful:
       · lww  — the proxy's "please wait" JS interstitial hangs headless
+      · ck   — the ClinicalKey SPA only bootstraps headful (headless hangs on its splash)
       · meta with nav=True (BMJ-class) — their CF only passes a real navigation
     `is_logged_in` (the gate page) can report VALID while the per-subdomain proxy
     authorization has separately expired → the proxy returns an auth page. So any proxy
@@ -1589,7 +1752,7 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
     prefix = doi.split("/")[0]
     route = ROUTES.get(prefix, {})
     kind = route.get("kind")
-    needs_headful = kind == "lww" or (kind == "meta" and route.get("nav"))
+    needs_headful = kind in ("lww", "ck") or (kind == "meta" and route.get("nav"))
     ctx = _new_context(pw, headless=not needs_headful)
     _mark("restore_session")
     restore_session(ctx)
@@ -1633,6 +1796,8 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
         # concurrent-licence seat (self-inflicted E3).
         if kind == "lww":
             attempt = lambda: _lww_ovid_pdf(page, doi, out)
+        elif kind == "ck":
+            attempt = lambda: _ck_pdf(page, doi, out)
         elif kind == "meta":
             attempt = lambda: _citation_meta_pdf(page, doi, out, nav=bool(route.get("nav")),
                                                  host=route.get("host"))
