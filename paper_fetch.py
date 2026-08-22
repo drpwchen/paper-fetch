@@ -7,12 +7,21 @@
     python paper_fetch.py <DOI>            # 不給輸出檔 → 只試抓並回報狀態，不存檔
     python paper_fetch.py --json <DOI> [out.pdf]   # agent 模式：stdout 只出一行 JSON envelope
                                                    # （診斷全走 stderr），typed exit codes
+    python paper_fetch.py --title "<文章標題>" <DOI> <out.pdf>
+                                                   # ==批次取件請一律加 --title==：驗證抓到的
+                                                   # 是不是「那一篇」，整本增刊會自動切出該篇
 
 Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用法錯誤 · 2=自動路線全敗
 JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
-                partial_path?, reject_reason?, oa_claimed?, elapsed_s}
+                partial_path?, reject_reason?, oa_claimed?, verify?, verify_detail?,
+                volume_path?, extracted_pages?, elapsed_s}
 「有效 PDF」＝ magic bytes ＋內容驗證（頁數/抽出字量；擋 in-press 的 1 頁 pre-proof 封面）。
 未過驗證的回應存 <out>.partial、reject_reason 進 envelope，階梯繼續往下走。
+
+==給了 --title 才有第二層（內容層）驗證==：位元組層分不出「這篇文章」與「這篇文章所在的
+那一本」。會議摘要常掛增刊的 DOI，於是 Unpaywall／TDM／機構 proxy 三條路都會誠實地回整本
+——一個 563 頁的會議摘要集完全合乎 `%PDF-` ＋大小檢查（2026-08，一批 49 篇裡 20% 中招）。
+細節與判準見 `pdf_verify.py`。
 
 路線（依 DOI 前綴自動選，失敗逐階 fallback，最後印機構 SFX 連結）:
     10.1016            → Elsevier TDM Article Retrieval API   (key: ELSEVIER_TDM_KEY)
@@ -95,6 +104,11 @@ def pdf_gate(content: bytes):
         with fitz.open(stream=content, filetype="pdf") as doc:
             pages = doc.page_count
             if pages >= 2:
+                # 多頁一律放行，但厚到不像單篇時要出聲：會議摘要掛增刊 DOI 時，每一條
+                # 路線都會誠實地回整本（pdf_verify.VOLUME_PAGES 用的是同一個門檻）。
+                if pages >= 60:
+                    print(f"  ⚠ {pages} 頁 — 不像單篇文章，可能是整本期刊／增刊。"
+                          "加 --title \"<標題>\" 可自動驗證並切出該篇")
                 return True, None
             text = "".join(p.get_text() for p in doc)
     except Exception as e:
@@ -400,7 +414,40 @@ def routes_for(doi):
     return primary + [route_unpaywall]
 
 
-def run_ladder(doi, out):
+def content_check(pdf: bytes, title, out):
+    """第二層驗證：這份 PDF 是不是「那一篇」。沒給 title 就回空 dict（不做）。
+
+    整本增刊（volume_like）會就地切出該篇，==整本保留成 <stem>_volume.pdf 不刪==：
+    它是複查「切的那頁對不對」唯一的依據。title_absent／no_text 不擋收件（掃描版式、標題
+    在圖片裡都會這樣），但一定要留在 envelope 裡讓呼叫端看見——拿錯文件比缺全文更糟。"""
+    if not title:
+        return {}
+    try:
+        import pdf_verify
+    except ImportError:
+        print("  ⚠ pdf_verify 不可用 → 跳過內容驗證")
+        return {}
+    res = pdf_verify.verify(pdf, title)
+    info = {"verify": res["verdict"], "verify_detail": res["detail"]}
+    if res["verdict"] == "match":
+        print(f"  ✓ 內容驗證：{res['detail']}")
+        return info
+    print(f"  ⚠ 內容驗證：{res['verdict']} — {res['detail']}")
+    if res["verdict"] == "volume_like" and out:
+        cut = pdf_verify.extract(out, title)
+        if cut["extracted"]:
+            print(f"  ✂ 從整本切出 p{cut['first_page']}-{cut['last_page']}／{cut['pages']} 頁"
+                  f"（連續命中 {cut['ratio']:.0%}，第二名 {cut['runner']:.0%}）")
+            print(f"    整本保留 → {cut['volume_path']}")
+            info.update({"verify": "extracted_from_volume",
+                         "volume_path": cut["volume_path"],
+                         "extracted_pages": [cut["first_page"], cut["last_page"]]})
+        else:
+            print(f"  ✗ 整本裡定位不到這篇（{cut['reason']}）→ 檔案原樣留著，人工確認")
+    return info
+
+
+def run_ladder(doi, out, title=None):
     """Walk the route ladder. Returns an envelope dict (also the --json payload).
 
     Exit-code contract — same table as library_session.py so orchestrators need one rule:
@@ -424,10 +471,16 @@ def run_ladder(doi, out):
                 print("  下一步：把此 PDF 拖進對應 Zotero item，ZotMoov 會自動搬到 linked-files 資料夾並轉 linked。")
             else:
                 print(f"✓ 抓到有效 PDF（{len(pdf)} bytes）；未指定輸出檔，未存。")
-            return {"schema": 1, "doi": doi, "ok": True, "route": name,
-                    "tried": tried, "bytes": len(pdf),
-                    "sha256": hashlib.sha256(pdf).hexdigest(), "path": path,
-                    "elapsed_s": round(time.time() - started, 1)}
+            checked = content_check(pdf, title, out)
+            env = {"schema": 1, "doi": doi, "ok": True, "route": name,
+                   "tried": tried, "bytes": len(pdf),
+                   "sha256": hashlib.sha256(pdf).hexdigest(), "path": path,
+                   "elapsed_s": round(time.time() - started, 1)}
+            if path and checked.get("extracted_pages"):   # 切過了 → 重算實際檔案的指紋
+                data = out.read_bytes()
+                env.update({"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+            env.update(checked)
+            return env
 
     # 全部失敗 → 機構 SFX 連結
     resolver = SFX_BASE.format(doi=doi) if SFX_BASE else None
@@ -462,10 +515,26 @@ def run_ladder(doi, out):
 
 
 def main():
-    as_json = "--json" in sys.argv[1:]
-    args = [a for a in sys.argv[1:] if a != "--json"]
+    argv = sys.argv[1:]
+    as_json = "--json" in argv
+    title = None
+    args = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--json":
+            pass
+        elif a == "--title":
+            i += 1
+            title = argv[i] if i < len(argv) else None
+        elif a.startswith("--title="):
+            title = a.split("=", 1)[1]
+        else:
+            args.append(a)
+        i += 1
     if not args:
-        print("用法: python paper_fetch.py [--json] <DOI> [out.pdf]", file=sys.stderr)
+        print('用法: python paper_fetch.py [--json] [--title "<標題>"] <DOI> [out.pdf]',
+              file=sys.stderr)
         sys.exit(1)
     doi = args[0].strip().removeprefix("https://doi.org/").removeprefix("doi:")
     out = pathlib.Path(args[1]) if len(args) > 1 else None
@@ -475,10 +544,10 @@ def main():
         # --json contract: stdout carries EXACTLY one JSON envelope; every
         # diagnostic line the routes print is rerouted to stderr.
         with contextlib.redirect_stdout(sys.stderr):
-            env = run_ladder(doi, out)
+            env = run_ladder(doi, out, title)
         print(json.dumps(env, ensure_ascii=False))
     else:
-        env = run_ladder(doi, out)
+        env = run_ladder(doi, out, title)
     sys.exit(0 if env["ok"] else 2)
 
 

@@ -159,6 +159,8 @@ How to register for the publisher TDM APIs (Elsevier / Wiley / Springer / Unpayw
 ```bash
 python paper_fetch.py 10.1371/journal.pone.0000000 out.pdf   # OA / TDM — works out of the box
 python paper_fetch.py --json 10.1016/xxx out.pdf             # agent mode: JSON envelope on stdout
+python paper_fetch.py --title "<article title>" 10.1007/xxx out.pdf   # + content verification
+python pdf_verify.py out.pdf --title "<article title>" --extract      # is this the article?
 python holdings.py 10.1097/xxxxx                             # do I even have access to this?
 python library_session.py check                              # proxy layer (after config.yaml `auth:` is set)
 python library_session.py fetch 10.1002/xxxxx out.pdf
@@ -192,12 +194,34 @@ your library's SFX link for a manual finish. `sha256` lets batch callers dedupe.
 |---|---|---|
 | `0` | PDF obtained | validate `%PDF`, carry on |
 | `1` | usage error | fix the command |
-| `2` | no route / auth failed | genuinely unavailable — stop |
+| `2` | a route ran and came back empty | **the only code that is evidence about the paper** |
+| `3` | auth failed / session expired — `library_session.py` only | run `login`, then retry — says *nothing* about the paper |
 | `4` | profile busy (another fetch holds the lock) — `library_session.py` only | **retry serially** — not a missing paper |
 | `5` | watchdog abort (`PAPERFETCH_TIMEOUT_S`, default 240 s) — `library_session.py` only | **retry once** — not a missing paper |
+| `6` | no route for this publisher prefix — `library_session.py` only | check `holdings.py`; a subscribed prefix is worth a new route |
 
-Codes `4` and `5` mean "try again, one at a time" — never record them as "no full text."
-Conflating them is the single easiest way to wrongly conclude a paper is unobtainable.
+Only `2` tells you anything about the article. `3`, `4`, `5` and `6` all mean "fix something and
+try again" — recording any of them as "no full text" is the single easiest way to wrongly
+conclude a paper is unobtainable. Codes `3` and `6` used to be folded into `2`, and a batch that
+started with an expired session recorded nine papers as paywalled when one automatic `login`
+would have got all nine. ==Run `library_session.py check` before a batch and abort the whole
+batch if the session is dead.==
+
+### Is the PDF you got actually that article?
+
+```bash
+python paper_fetch.py --title "<article title>" <DOI> out.pdf   # verify while fetching
+python pdf_verify.py out.pdf --title "<article title>" --extract  # verify (and cut) after
+```
+
+A `%PDF` check cannot tell *the article* from *the whole issue the article is in*. Conference
+abstracts routinely carry the **supplement's** DOI, so Unpaywall, the publisher's TDM API and
+your library's proxy all honestly hand back the entire proceedings volume — in one 49-paper
+batch, 20% of the "successful" downloads were whole volumes, one of them 563 pages logged as
+`ok`. Given a title, the fetch verifies the article is really in the file and, for a volume,
+cuts out the pages the article sits on (keeping the volume as `<stem>_volume.pdf`). The test is
+the longest **contiguous** run of the title in a page's text — a bag-of-words score matches a
+proceedings page whose neighbouring abstracts happen to share vocabulary.
 
 ### ⚠ Before you batch or parallelize
 
@@ -220,6 +244,7 @@ wrong credentials.
 | `[login] FAILED after retries` | wrong creds, CAPTCHA misreads, or the gate is rate-limiting you | verify the credentials by logging in **manually in a browser** first; if they work there, you're temporarily blocked → wait 30–60 min |
 | `cf_challenge` / `cf_block` | Cloudflare intercepted the request | the tool retries headful once automatically; if it persists, wait — don't hammer |
 | Ovid/LWW route stalls or errors | E3 concurrent-licence-seat limit | wait 30 min (`PAPERFETCH_OVID_COOLDOWN_S`); the tool backs off on its own |
+| exit `3` | auth failed / session expired | run `login` (automatic) and retry — **not** a missing paper; in a batch, stop the batch |
 | exit `4` / `5` | profile busy / watchdog | retry serially later — **not** a missing paper |
 
 One rule covers all of it: **the same failure twice in a row means stop**, run

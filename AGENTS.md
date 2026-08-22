@@ -66,15 +66,40 @@ Second corollary: **a "dead end" verdict can be wrong.** BMJ was documented here
 dead end; in fact the WAF only blocks *headless* requests, and a real headful navigation passes
 first try. If a citation-meta route returns `cf_block`, try `nav=True` before concluding anything.
 
+Third corollary, the mirror image: **a verdict that once held can go stale.** BMJ's headful `nav`
+route passed on the first try when it was added; two months later the same DOI logged `cf_block`
+twice and a 403 with `nav` still in effect. Read that as "Cloudflare, wait or finish by hand",
+not as "the flag is broken" or "we lost the subscription" — `holdings.py` still says subscribed.
+And check the *name* of the failure before you trust it: that 403 was logged as `no_pdf_meta`
+(a 403 page has no `citation_pdf_url` in it either), which is the same wall wearing a different
+label. Resolver responses are now classified before the meta tag is looked for.
+
+Fourth: **"no `citation_pdf_url`" is not "no route".** Some entitled articles simply don't carry
+the tag (Nature news/comment items). A `meta` route can take `pdf_from_landing: "{landing}.pdf"`
+to derive the PDF URL from the article URL instead of giving up.
+
 ## Calling it from an orchestrator
 
 - `paper_fetch.py --json <DOI> <out>` prints **exactly one JSON envelope on stdout** (all
   diagnostics go to stderr): `{schema, doi, ok, route, tried[], bytes, sha256, path,
   resolver_url?, elapsed_s}`. Parse that; do not scrape logs.
-- **Exit codes** (same table for both scripts): `0` PDF obtained · `1` usage error · `2` no route
-  / auth failed (genuinely unavailable) · `4` profile busy · `5` watchdog abort.
-- **`4` and `5` mean "retry, serially" — they do NOT mean "this paper has no full text."**
-  Recording them as unavailable is the easiest way to wrongly write a paper off.
+- **Exit codes** (same table for both scripts): `0` PDF obtained · `1` usage error · `2` a route
+  ran and came back empty · `3` **auth failed / session expired** · `4` profile busy · `5`
+  watchdog abort · `6` no route for this publisher prefix.
+- **Only `2` is evidence about the PAPER.** `3`, `4`, `5` and `6` all mean "fix it and retry" —
+  recording any of them as unavailable is the easiest way to wrongly write a paper off.
+- **Run `check` before a batch, and abort the whole batch if the session is invalid.** A dead
+  session produces one failure per paper, and every one of them reads like "this paper has no
+  route": nine papers were written off as paywalled that way while `3` still shared code `2` —
+  a single (fully automatic) `login` fixed all nine. ==A "no full text" conclusion is only
+  valid if the session was valid at the time.==
+- **Pass `--title "<article title>"` whenever you have it.** A `%PDF` check cannot tell the
+  article from the whole supplement it sits in: conference abstracts carry the *supplement's*
+  DOI, so every route honestly returns the entire proceedings volume — 20% of one 49-paper
+  batch, including a 563-page file logged `ok`. With a title, `pdf_verify.py` confirms the
+  article is in there and cuts it out of the volume (the volume is kept alongside). Handing a
+  whole volume to a downstream reader is worse than handing it nothing: it produces a
+  confident answer about the wrong study.
 - The proxy layer is **strictly serial** with a courtesy delay. Never parallelise it: the browser
   profile is an exclusive resource (parallel callers deadlock, then get logged as missing papers),
   and systematic downloading gets the institution's whole IP range blocked. Batch patterns are in

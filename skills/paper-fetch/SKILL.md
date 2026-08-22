@@ -1,14 +1,16 @@
 ---
-name: paper-download
+name: paper-fetch
 description: >
   Add academic papers to Zotero via MCP (DOI/PMID/title); fetch full-text PDFs through
   a publisher-aware route ladder (Unpaywall → Elsevier/Wiley/Springer TDM → institutional
   proxy → SFX); PDFs land in a linked-files folder (ZotMoov), never uploaded to Zotero cloud.
+  Also verifies that a downloaded PDF really is that article (and cuts it out of a whole
+  conference supplement when it isn't).
   Trigger: "下載論文", "抓全文", "download paper", "get full text", "加進 Zotero",
-  or when /paper-review needs a paper added to the library.
+  "抓到整本", "PDF 是不是這篇", or when /paper-review needs a paper added to the library.
 ---
 
-# Paper Download — 論文入庫
+# Paper Fetch — 論文入庫
 
 ## Overview
 
@@ -107,8 +109,14 @@ handles the linked file. Use `paper_fetch.py` when the publisher blocks automate
 
 ```
 python paper_fetch.py <DOI> <out.pdf>
+python paper_fetch.py --title "<article title>" <DOI> <out.pdf>
 ```
 
+- ==批次取件一律加 `--title`==：`%PDF` 這種位元組層檢查分不出「這篇文章」與「這篇文章所在
+  的那一本」。會議摘要常掛**增刊的 DOI**，於是 Unpaywall／TDM／機構 proxy 三條路都會誠實地
+  回整本——一個 563 頁、48 MB 的會議摘要集完全合乎 `%PDF-` ＋大小檢查而被記成 `ok`。
+  給了 `--title` 就會做內容驗證，判為整本時**自動切出該篇**（整本保留成 `<stem>_volume.pdf`）。
+  見下面「內容層驗證」。
 - Routes by DOI prefix, validates `%PDF`, falls back to Unpaywall, and on total failure
   prints your institution's SFX link (from `config.yaml`).
 - Keys read from DPAPI, never printed. Windows-only for now (this script has not been
@@ -123,8 +131,10 @@ For subscribed-but-paywalled papers (Wiley, LWW, Sage, NEJM…) when working fro
 
 ```
 python library_session.py fetch <DOI> <out.pdf>
-python library_session.py check    # session still valid?
+python library_session.py fetch <DOI> <out.pdf> --title "<article title>"
+python library_session.py check    # session still valid?  ← 批次開跑前一定要先跑
 python library_session.py stats    # rate / block analysis
+python library_session.py routes   # per-route scorecard + holdings gaps
 ```
 
 - Logs into your library's remote-auth system automatically: credentials from the secret
@@ -144,13 +154,59 @@ python library_session.py stats    # rate / block analysis
 - **Bounded failure**: a watchdog (`PAPERFETCH_TIMEOUT_S`, default 240 s) exits `5` instead
   of hanging, and tree-kills its own chromium. Never wrap the script in a bare `timeout` —
   that kills the parent and orphans the browser.
-- **Exit codes**: `0` PDF · `1` usage · `2` no route/auth failed · `4` busy · `5` watchdog.
-  **`4`/`5` mean "retry serially", not "no full text".**
+- **Exit codes**: `0` PDF · `1` usage · `2` 路線跑了但回空 · `3` 認證失敗／session 過期 ·
+  `4` busy · `5` watchdog · `6` 此 prefix 無路線。==只有 `2` 是關於這篇論文的證據==；
+  其餘都是「修好再跑」。見下面「批次取件的兩條硬規矩」。
 - ⚠️ `is_oa: true` from Unpaywall does **not** guarantee a PDF: hybrid and ahead-of-print
   articles report OA with no usable `url_for_pdf`. Fall through instead of giving up.
 - **Rate awareness**: every proxy hit is logged; run `stats` to watch for the first block
   and learn the true daily ceiling. The courtesy delay (`rate.min_interval_s`) can be
   lowered but bulk download risks blocking the whole institution's IP — see the script.
+
+#### 批次取件的兩條硬規矩（2026-08-21 用九篇論文換來的）
+
+**① 批次開始前先 `check`，session 無效就中止整批。**
+一個 session 已死的批次，會**每篇各產生一次失敗**，而每一筆看起來都像「這篇沒有管道」。
+一輪 9 篇就這樣全被判成付費牆抓不到，事後 `login` 一次就成功（憑證＋離線 OCR 全自動），
+9 個假 failed 其實是 **1 個認證失敗**。
+==任何「無全文／無管道」的結論，前提都是「當下 session 有效」；前提壞了，結論不成立。==
+
+**② exit code 已拆開，不要再把非 0 都當成缺全文。**
+
+| code | 意思 | 對這篇論文的意涵 |
+|---|---|---|
+| `0` | PDF 到手 | — |
+| `1` | 用法錯 | — |
+| `2` | 路線跑了，回來是空的 | ==只有這個==是關於論文本身的證據 |
+| `3` | **認證失敗／session 過期** | 對論文**零資訊** → 修 session 再跑 |
+| `4` / `5` | profile 忙／watchdog | 串行重試，不是缺全文 |
+| `6` | 這個出版社還沒有路線 | 館藏可能仍有訂閱 → 值得補路線 |
+
+（`3` 與 `6` 以前都混在 `2` 裡，這正是那九筆假 failed 的成因。`check` 的 EXPIRED 也回 `3`。）
+
+**③ SFX／link resolver 的服務清單不是館藏全貌。** 它免登入可讀，可以當「先試哪條路」的排序
+訊號，但**不能當判決**：有期刊在清單上完全沒有全文 target，館方其實訂了（`10.1136` BMJ 即是
+實例，holdings 顯示 subscribed／covered）。==要標成「無管道」，必須在有效 session 下實際走過
+一次路線表。==
+
+#### 內容層驗證：抓到的是不是「那一篇」— `pdf_verify.py`
+
+```
+python pdf_verify.py <pdf> --title "<article title>" [--extract]
+```
+
+- **為什麼要有**：取件腳本一路只用 `%PDF-` ＋大小當合格條件，於是 48 MB／563 頁的會議摘要集
+  被標成 `ok`。全掃 49 篇後發現 ==10 篇（20%）拿到的是整本==，而且全是核心研究。
+  ==拿錯文件去跑全文篩選比缺全文更糟——它會對錯的研究產出一個有信心的答案。==
+- **成因是常態不是意外**：會議摘要常掛**增刊的 DOI**，每一條路線都會誠實地把整本交給你。
+- **判準**：標題要在頁面裡**連續**出現（不是關鍵詞集合——摘要集一頁塞好幾篇，bag-of-words
+  會讓隔壁兩篇各出一個詞湊出假命中）；正規化時接回跨行斷字。判定：`match` /
+  `volume_like`（切）/ `title_absent` / `no_text` / `unreadable`。
+- **整本一律保留成 `<stem>_volume.pdf` 不刪**：它是花一次機構 session 換來的，也是複查
+  「切的那一頁對不對」唯一的依據。定位模稜兩可時**寧可不切**。
+- ==驗證方法選錯，會製造出比原始錯誤更難察覺的假警報==：第一版複驗只印每頁前 230 字抽查，
+  據此判定「4 筆有 3 筆切錯」——錯的是那個判定（標題在頁面下半）。改成整頁比對後，10 個
+  候選頁 100% 命中、第二名只有 20–45%。檢查的粒度要對得上文件的排版。
 
 ### Step 5: Verify and bidirectional links
 
@@ -181,11 +237,16 @@ python library_session.py stats    # rate / block analysis
 
 ## Batch Mode (eTOC / RSS / DOI list)
 
-1. Collect DOIs.
+1. Collect DOIs **和標題**（標題是內容驗證的必要輸入，不是裝飾）。
 2. `add_by_doi` for each (metadata).
-3. Run `paper_fetch.py` per DOI that needs a TDM/OA fetch → PDFs to a staging folder.
-4. Drag the batch of PDFs onto their items; ZotMoov auto-processes all (one move per file).
-5. Summary: added / already-exists / PDF-linked / needs-SFX.
+3. ==批次動工前先 `library_session.py check`==；EXPIRED（exit `3`）就先 `login`，
+   **不要讓整批帶著死 session 跑**。
+4. Run `paper_fetch.py --title "<title>" <DOI> <out.pdf>` per DOI → PDFs to a staging folder；
+   仍失敗的走 `library_session.py fetch <DOI> <out.pdf> --title "<title>"`（==SERIAL==）。
+5. 逐筆記 exit code（`2` 才是缺全文；`3` 認證、`6` 無路線要另外處理），並記下
+   `pdf_verify` 的判定；`volume_like` 已自動切頁，`title_absent`／`no_text` 要人工看一眼。
+6. Drag the batch of PDFs onto their items; ZotMoov auto-processes all (one move per file).
+7. Summary: added / already-exists / PDF-linked / needs-SFX / 內容驗證異常。
 
 **⚠ Batch caution**: the proxy path is serial and throttled for a reason. Batching many
 paywalled DOIs through `library_session.py` is exactly the pattern that trips a publisher's
@@ -200,6 +261,10 @@ and stop if `stats` shows a block.
 | Elsevier/Wiley/Springer blocked | `paper_fetch.py <DOI> <out.pdf>` (auto-routes by prefix) |
 | Missing TDM token | Script prints `secret.ps1 set <NAME>` — user stores it; never read the key |
 | All auto routes fail (paywall/Cloudflare) | Script prints SFX link → institutional login → manual download → drag onto item |
+| `library_session.py` exit `3`（認證） | `login` 一次（全自動）→ 重跑。**不要記成缺全文**；批次中出現就中止整批 |
+| `library_session.py` exit `6`（無路線） | 查 `holdings.py <DOI>`；訂閱中就值得補 ROUTES，`subscribed=None` 也不代表沒權限 |
+| 抓到的 PDF 是整本增刊 | 給 `--title` 就會自動切出該篇（整本留成 `<stem>_volume.pdf`）；或事後 `pdf_verify.py <pdf> --title "…" --extract` |
+| `pdf_verify` 判 `title_absent`／`no_text` | 不自動處理——人工開檔看一眼（掃描件、勘誤頁、抓到別篇都長這樣） |
 | PDF not moving to linked folder | Check ZotMoov `enable_automove`; for already-synced files temporarily set `process_synced_files=true`, then "Move + Convert to Linked" |
 | Zotero not running | Local API needs Zotero open |
 | Duplicate detected | Show existing item's citekey |

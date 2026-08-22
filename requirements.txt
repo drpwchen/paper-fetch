@@ -4,7 +4,9 @@ pyyaml>=6.0
 patchright>=1.40      # stealth Playwright fork — passes Cloudflare headless
 ddddocr>=1.4          # offline CAPTCHA OCR (numeric for the library gate, alphanumeric for NDLTD)
 pymupdf>=1.23         # ndltd.py merges a thesis's per-chapter PDFs into one file; both
-                      # Chinese-source modules use it to verify page counts
+                      # Chinese-source modules use it to verify page counts; pdf_verify.py
+                      # (content verification + cutting an article out of a whole volume)
+                      # and paper_fetch.py's in-press cover-sheet gate need it too
 psutil>=5.9           # reliable process-tree teardown. Without it the watchdog falls back to
                       # taskkill (Windows) or a pgrep walk (POSIX) — and to nothing at all
                       # where pgrep is absent, leaking an orphaned chromium.

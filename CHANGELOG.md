@@ -5,6 +5,69 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-08-22
+
+Everything here comes from one 147-paper systematic-review retrieval run, which surfaced two
+failures no unit test would have caught: **an expired session is indistinguishable from a
+missing paper**, and **a whole conference volume is indistinguishable from the article inside
+it** — unless something goes and looks.
+
+> ⚠ **Callers: exit code `2` has narrowed.** Auth failure is now `3`, and "no route for this
+> prefix" is now `6`. An orchestrator that treats "non-zero = no full text" was already wrong;
+> it is now wrong in a way it can fix. `check` returns `3` (not `2`) when the session expired.
+
+### Added
+- **`pdf_verify.py` — content-level verification, and rescue of an article from a whole
+  volume.** `verify(pdf, title)` answers "is this file that article?"; `--extract` locates the
+  article inside a proceedings volume and cuts out its pages, keeping the original as
+  `<stem>_volume.pdf`. Acceptance is the longest **contiguous** run of the title in a page's
+  normalised text (a bag-of-words score matches a proceedings page whose neighbouring
+  abstracts merely share vocabulary), hyphenation across line breaks is folded back, and an
+  ambiguous volume yields nothing rather than a guess. Verdicts: `match` · `volume_like` ·
+  `title_absent` · `no_text` · `unreadable` · `no_title`. Validated against 11 real volumes:
+  the page it picks matched the hand-checked page 11/11 (title 100% contiguous on the winner,
+  runner-up 23–45%).
+- **`--title "<article title>"` on both `paper_fetch.py` and `library_session.py fetch`** —
+  runs that verification on whatever the ladder returns, cutting volumes down to the article
+  automatically. `library_session.py` forwards the title to `paper_fetch.py` on layer 1. The
+  envelope gains `verify`, `verify_detail`, `volume_path`, `extracted_pages`; `bytes` and
+  `sha256` are recomputed after a cut.
+- **Typed exit codes `3` (auth) and `6` (no route)**, split out of the old catch-all `2`, plus
+  a documented batch discipline: run `check` first, abort the batch when the session is dead.
+- **`10.1210` (Endocrine Society / JCEM)** as a `meta` route — the same Silverchair platform as
+  OUP `10.1093`; it had been logging `no_route` while those papers were fetched by hand. The
+  route comment records the verified Silverchair mechanics (article-pdf URL → watermark token
+  URL that needs no cookie; non-navigation fetches are 403; the first navigation can bounce).
+- **`pdf_from_landing` option for `meta` routes**, used by `10.1038`: derive the PDF URL from
+  the landing URL when the article page carries no `citation_pdf_url` at all.
+- `routes` now also lists routeless prefixes whose entitlement is *unknown* (`subscribed=None`).
+  The old filter showed only prefixes known to be subscribed — hiding exactly the
+  database-level platforms that are not in an A–Z list yet fetch fine.
+
+### Fixed
+- **A blocked resolver was reported as `no_pdf_meta`.** A Cloudflare 403 is an HTML page with
+  no `citation_pdf_url` in it, so the meta route fell through and logged "this publisher
+  advertises no PDF" for what was really "we never reached the article page" — the same wall
+  under two names, on consecutive runs of the same DOI. Resolver responses are now classified
+  (CF / 4xx / 5xx / login bounce) *before* the meta tag is looked for, and a resolver that
+  lands directly on a PDF is accepted instead of discarded.
+- `_citation_meta_pdf` no longer touches `r.status` when a headful navigation returned no
+  response object, and it uses the landing URL as `Referer`.
+- **A login failure inside `fetch` printed "route could not fetch"** — indistinguishable from a
+  paper that has no route. It now says in as many words that this is an authentication problem
+  and that `login` (which opens a real window) is the fix, and exits `3`.
+
+### Changed
+- The bundled skill is now `skills/paper-fetch/` (was `skills/paper-download/`), matching the
+  project name. Invoke it as `/paper-fetch`.
+- `10.1136` (BMJ) is annotated as **Cloudflare-flaky** rather than "passes first try": with
+  `nav` verifiably in effect, the same subscribed DOI logged `cf_block` twice and one 403, two
+  months after the route was added. The flag works; the wall moved. `AGENTS.md` gains the
+  general form — *a verdict that once held can go stale* — and its corollary: check the **name**
+  of a failure before trusting it.
+- `README.md`, `AGENTS.md`, `docs/operations.md` and the skill all carry the new exit-code
+  table, the check-before-batch rule, and the `--title` rule.
+
 ## [1.4.0] — 2026-08-19
 
 ClinicalKey proxy route (`ck`) — closes the gap [#2](https://github.com/drpwchen/paper-fetch/issues/2)

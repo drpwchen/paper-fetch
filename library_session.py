@@ -65,8 +65,20 @@ CLI:
     python library_session.py check                    # is the stored session valid?
     python library_session.py login                    # force a fresh login
     python library_session.py fetch <DOI> <out.pdf>    # two-phase full-text download
+    python library_session.py fetch <DOI> <out.pdf> --title "<article title>"
+                                                       # ...plus content verification:
+                                                       # is this the article, or the whole
+                                                       # supplement it sits in? (pdf_verify)
     python library_session.py stats                    # access-log summary / block analysis
     python library_session.py routes                   # per-route scorecard + holdings gaps
+
+BATCH DISCIPLINE (learned the expensive way, 2026-08-21):
+    Run `check` BEFORE a batch, and ABORT THE WHOLE BATCH if the session is invalid.
+    A batch that starts with a dead session produces one `fetch` failure per paper, and
+    every one of them reads as "this paper has no route" — 9 papers were written off as
+    paywalled that way, when a single `login` (which is fully automatic) fixed all of them.
+    ==Any "no full text available" conclusion is only valid if the session was valid at
+    the time.== That is why auth now has its own exit code instead of sharing 2.
 
 Windows-only as written (DPAPI is user-bound).
 
@@ -81,8 +93,13 @@ Bounded failure. Login/CAPTCHA and proxy interstitials can hang indefinitely; a 
   is orphaned. Never wrap this script in a bare `timeout` — that kills the parent only and
   leaks the browser.
 
-Exit codes: 0 ok · 1 usage · 2 fetch/auth failed · 4 profile busy (lock) · 5 watchdog abort.
-  4 and 5 mean "retry serially", NOT "no full text available".
+Exit codes: 0 ok · 1 usage · 2 a route ran and came back empty · 3 AUTH (login failed /
+  session expired) · 4 profile busy (lock) · 5 watchdog abort · 6 no route for this
+  publisher prefix.
+  ==Only 2 is evidence about the PAPER.== 3 says nothing about it (fix the session and
+  retry); 6 says the publisher has no route yet (holdings may still say subscribed);
+  4 and 5 mean "retry serially". Before 2026-08-22 codes 2/3/6 were one code, and a batch
+  run with an expired session logged nine "no full text" verdicts that were all wrong.
 """
 from __future__ import annotations
 
@@ -222,11 +239,28 @@ ROUTES: dict[str, dict] = {
     "10.1542": {"kind": "meta"},                                 # Pediatrics ✅
     "10.1183": {"kind": "meta"},                                 # European Respiratory J ✅
     "10.3171": {"kind": "meta"},                                 # J Neurosurg ✅
-    "10.1038": {"kind": "meta"},                                 # Nature portfolio ✅
+    # Nature portfolio: news/comment items (and some older articles) carry NO
+    # citation_pdf_url — the meta route then reports `no_pdf_meta` on a perfectly
+    # entitled article (observed 3× on 10.1038/466914a, 215 KB article page, 2026-08-21).
+    # Their PDF URL is derivable from the landing URL, so give the route a fallback.
+    "10.1038": {"kind": "meta", "pdf_from_landing": "{landing}.pdf"},
+    # Endocrine Society (JCEM / Endocrine Reviews / JES) — same Silverchair platform as
+    # OUP 10.1093. Added 2026-08-22 after two JCEM papers logged `no_route` and had to be
+    # fetched by hand. ==Silverchair specifics (verified end-to-end in a real browser)==:
+    # doi.org → article page → citation_pdf_url → that URL 302s to a
+    # watermarkNN.silverchair.com token URL whose body is the PDF and which needs NO
+    # cookie; a non-navigation fetch of the article-pdf URL is 403 (CF allows navigations
+    # only), and the FIRST navigation sometimes bounces back to the article page — the
+    # second succeeds. If this route logs cf_block, add `"nav": True` (and keep the
+    # one built-in retry in mind — it is what covers the bounce).
+    "10.1210": {"kind": "meta"},                                 # Endocrine Society
     # --- meta + headful nav (Cloudflare blocks headless) ---
-    "10.1136": {"kind": "meta", "nav": True},                    # BMJ ✅ — the earlier "WAF dead end"
-    #                                                              verdict was a headless-only artifact;
-    #                                                              a headful navigation passes first try.
+    # BMJ: headless is definitely blocked; headful `nav` passed on the first try when the
+    # route was added (2026-07-14). ==It is not passing reliably any more== — 2026-08-21/22
+    # logged cf_block×2 and one HTTP 403 with nav=True in effect. Treat a BMJ failure as
+    # "Cloudflare, retry later / SFX by hand", NOT as evidence that `nav` is broken or that
+    # the library lacks a subscription (holdings says BMJ Journals, covered=True).
+    "10.1136": {"kind": "meta", "nav": True},                    # BMJ ⚠ CF-flaky since 2026-08
     "10.3174": {"kind": "meta", "nav": True, "host": "www.ajnr.org"},          # AJNR — CF "Just a moment"; doi-org resolver loops → /lookup/doi/
     "10.2967": {"kind": "meta", "nav": True, "host": "jnm.snmjournals.org"},   # J Nucl Med — same
     # --- lww (Ovid multi-step, headful; concurrent-licence seats apply) ---
@@ -967,13 +1001,16 @@ def _classify_exc(e: Exception) -> str:
     return "request_error"
 
 
-def _try_paper_fetch(doi: str, out: Path) -> bool:
+def _try_paper_fetch(doi: str, out: Path, title: str | None = None) -> bool:
     """Layer 1: API/OA/TDM (Elsevier TDM, Springer OA, Unpaywall) — no proxy, no CF."""
     if not PAPER_FETCH.exists():
         return False
+    cmd = [sys.executable, str(PAPER_FETCH)]
+    if title:                      # → content verification + volume extraction downstream
+        cmd += ["--title", title]
+    cmd += [doi, str(out)]
     try:
-        r = subprocess.run([sys.executable, str(PAPER_FETCH), doi, str(out)],
-                           timeout=120, capture_output=True, text=True,
+        r = subprocess.run(cmd, timeout=120, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
     except Exception:
         return False
@@ -1321,7 +1358,8 @@ def _sfx_lww_target(page, doi: str) -> str | None:
 
 
 def _citation_meta_pdf(page, doi: str, out: Path, nav: bool = False,
-                       host: str | None = None) -> str:
+                       host: str | None = None,
+                       pdf_from_landing: str | None = None) -> str:
     """Generic multi-step route: resolver → article HTML → `citation_pdf_url` meta →
     PDF fetched with `Referer`. Returns "pdf"|"auth"|"fail" (same convention as
     _lww_ovid_pdf).
@@ -1338,6 +1376,11 @@ def _citation_meta_pdf(page, doi: str, out: Path, nav: bool = False,
       reached headless is only valid for headless.==
     host=None → the generic doi-org proxy resolver; a host string → that site's own
       `/lookup/doi/{doi}` (Highwire sites redirect-loop on doi-org).
+    pdf_from_landing="{landing}.pdf" → when the article page carries no
+      `citation_pdf_url`, derive the PDF URL from the landing URL instead of giving up.
+      ==Not every entitled article advertises the meta tag== (Nature news/comment items
+      don't), and `no_pdf_meta` on a subscribed article reads like a dead publisher when
+      it is really one missing tag.
     The PDF step is always request.get + Referer (same context, not re-blocked).
 
     Add a prefix to ROUTES once you've confirmed the publisher's PDF endpoint really
@@ -1369,13 +1412,30 @@ def _citation_meta_pdf(page, doi: str, out: Path, nav: bool = False,
                       "status": "auth_expired", "step": "doi_resolve"})
                 return "auth"
             continue
-        head = body[:3000].lower()
-        if b"attention required" in head or b"just a moment" in head:
+        # ==Classify the resolver response before looking for the meta tag.== A CF 403 is
+        # an HTML page with no `citation_pdf_url` in it, so the old code fell through and
+        # logged `no_pdf_meta` — which reads as "this publisher has no PDF link" when it
+        # actually means "we never got the article page" (BMJ, 2026-08-21: one run logged
+        # cf_block, the next logged no_pdf_meta on http 403 — same wall, two names).
+        cur_url = (page.url if nav else r.url) if r is not None or nav else ""
+        st = _classify(r, body) if r is not None else "no_response"
+        if st == "pdf":            # some resolvers land straight on the PDF
+            out.write_bytes(body)
             _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
-                  "status": "cf_block", "step": "doi_resolve", "nav": nav,
-                  "url": (page.url if nav else r.url)[:120]})
-            print(f"[meta] Cloudflare blocked the resolver (nav={nav}); "
-                  f"if nav=False, nav=True usually passes", file=sys.stderr)
+                  "status": "pdf", "step": "doi_resolve", "bytes": len(body)})
+            print(f"[meta] resolver went straight to the PDF -> {out} ({len(body)} bytes)",
+                  file=sys.stderr)
+            return "pdf"
+        if st in ("cf_challenge", "cf_block", "rate_limited") or (
+                r is not None and r.status >= 400):
+            _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
+                  "status": st, "step": "doi_resolve", "nav": nav,
+                  "http": (r.status if r is not None else None),
+                  "bytes": len(body), "url": cur_url[:120]})
+            _warn_if_blocked(st)
+            print(f"[meta] resolver blocked: {st} "
+                  f"(http {r.status if r is not None else '?'}, {len(body)}B, nav={nav})"
+                  + ("; nav=True usually passes" if not nav else ""), file=sys.stderr)
             return "fail"
         if "/login" not in (r.url if not nav else page.url):
             break
@@ -1389,19 +1449,25 @@ def _citation_meta_pdf(page, doi: str, out: Path, nav: bool = False,
         if not _login_submit_here(page):
             return "auth"
     html = body.decode("utf-8", "ignore")
+    landing = (page.url if nav else r.url).split("?")[0].rstrip("/")
     m = re.search(r'citation_pdf_url"\s+content="([^"]+)"', html)
-    if not m:
+    if m:
+        pdf_url = m.group(1)
+    elif pdf_from_landing:
+        pdf_url = pdf_from_landing.format(landing=landing)
+        print(f"[meta] no citation_pdf_url → derived from the landing URL: {pdf_url[:100]}",
+              file=sys.stderr)
+    else:
         _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
-              "status": "no_pdf_meta", "http": r.status, "bytes": len(body),
-              "url": r.url[:120]})
-        print(f"[meta] no citation_pdf_url on {r.url[:100]}", file=sys.stderr)
+              "status": "no_pdf_meta", "http": (r.status if r is not None else None),
+              "bytes": len(body), "url": landing[:120]})
+        print(f"[meta] no citation_pdf_url on {landing[:100]}", file=sys.stderr)
         return "fail"
-    pdf_url = m.group(1)
     host = urlsplit(pdf_url).netloc
     if PROXY_SUFFIX.split(":")[0] not in host:   # meta gave the public host → rewrite
         pdf_url = pdf_url.replace(host, _proxy_host(host), 1)
     try:
-        rp = page.request.get(pdf_url, headers={"referer": r.url}, timeout=NAV_TIMEOUT_MS)
+        rp = page.request.get(pdf_url, headers={"referer": landing}, timeout=NAV_TIMEOUT_MS)
         pb = rp.body()
     except Exception as e:
         _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
@@ -1738,9 +1804,48 @@ def _sfx_hint(doi: str) -> str:
     return f" SFX: {SFX.format(doi=doi)}" if SFX else ""
 
 
-def run_fetch(pw, doi: str, out: Path) -> bool:
+def _content_check(out: Path, title: str | None) -> None:
+    """Is the file we just wrote actually THIS article? (`pdf_verify`, only with a title.)
+
+    ==A byte-level check cannot tell "the article" from "the issue the article is in".==
+    Conference abstracts routinely carry the supplement's DOI, so every route — TDM API,
+    OA, and this proxy — honestly hands back the whole proceedings volume: a 563-page,
+    48 MB file that passes `%PDF` + size and gets logged `ok` (2026-08; 20% of one 49-paper
+    batch). A whole-volume PDF fed to a full-text screen produces a confident answer about
+    the wrong study, which is worse than a missing file. Volumes are cut down to the
+    article here, with the volume kept as `<stem>_volume.pdf`."""
+    if not title:
+        return
+    try:
+        import pdf_verify      # same directory, like paper_config
+    except ImportError:
+        print("[verify] pdf_verify unavailable → skipped", file=sys.stderr)
+        return
+    res = pdf_verify.verify(out, title)
+    if res["verdict"] == "match":
+        print(f"[verify] {res['detail']}", file=sys.stderr)
+        return
+    print(f"[verify] ⚠ {res['verdict']} — {res['detail']}", file=sys.stderr)
+    if res["verdict"] == "volume_like":
+        cut = pdf_verify.extract(out, title)
+        if cut["extracted"]:
+            print(f"[verify] ✂ cut p{cut['first_page']}-{cut['last_page']} of {cut['pages']} "
+                  f"({cut['ratio']:.0%} contiguous, runner-up {cut['runner']:.0%}); "
+                  f"volume kept as {cut['volume_path']}", file=sys.stderr)
+        else:
+            print(f"[verify] could not locate the article inside the volume "
+                  f"({cut['reason']}) — file left as is, check by hand", file=sys.stderr)
+
+
+def run_fetch(pw, doi: str, out: Path, title: str | None = None) -> str:
     """Three-layer ladder: ① paper_fetch's API/OA/TDM (no proxy) → ② holdings entitlement
     pre-check → ③ dispatch the proxy route by ROUTES[prefix]["kind"] (tpl / meta / lww).
+
+    ==Returns a REASON, not a bool==: "ok" | "auth" (session/login problem) | "no_route"
+    (no route for this publisher) | "fail" (a route ran and came back empty). main() maps
+    these onto distinct exit codes, because a caller that cannot tell "the session died"
+    from "there is no route" writes down N false "no full text" verdicts for what is one
+    expired login — exactly what happened to a 9-paper batch on 2026-08-21.
 
     Headless is the default (patchright clears most CF). Two cases MUST be headful:
       · lww  — the proxy's "please wait" JS interstitial hangs headless
@@ -1760,12 +1865,15 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
     _mark("new_page OK")
     try:
         # Layer 1 — API/OA/TDM (no proxy, no CF, no login). Works out of the box.
-        if _try_paper_fetch(doi, out):
+        if _try_paper_fetch(doi, out, title):
             print(f"[fetch] got via API/OA/TDM route -> {out}", file=sys.stderr)
-            return True
+            return "ok"
         if not ensure_login(page):
-            print("[fetch] login failed", file=sys.stderr)
-            return False
+            print("[fetch] LOGIN FAILED — this is an authentication problem, NOT evidence "
+                  "that the paper has no route. Run `library_session.py login` (it opens a "
+                  "real window; the proxy's JS interstitial can refuse to complete in the "
+                  "headless context a tpl/meta fetch runs in), then retry.", file=sys.stderr)
+            return "auth"
         # Layer 2 — holdings entitlement pre-check (see _entitlement's two traps)
         global _CUR_ENT
         ent = _CUR_ENT = _entitlement(doi)
@@ -1790,7 +1898,7 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
                   file=sys.stderr)
             _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "n/a",
                   "status": "skip_no_entitlement"})
-            return False
+            return "fail"
         # Layer 3 — proxy route by kind. Each is "run once → re-login+retry ONLY on auth
         # expiry": a re-login fixes nothing else, and re-running LWW costs another Ovid
         # concurrent-licence seat (self-inflicted E3).
@@ -1799,8 +1907,9 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
         elif kind == "ck":
             attempt = lambda: _ck_pdf(page, doi, out)
         elif kind == "meta":
-            attempt = lambda: _citation_meta_pdf(page, doi, out, nav=bool(route.get("nav")),
-                                                 host=route.get("host"))
+            attempt = lambda: _citation_meta_pdf(
+                page, doi, out, nav=bool(route.get("nav")), host=route.get("host"),
+                pdf_from_landing=route.get("pdf_from_landing"))
         elif kind == "tpl":
             # _proxy_pdf returns bool; wrap as "pdf"/"auth". It cannot distinguish auth
             # expiry, so a failure always gets one fresh-login retry.
@@ -1814,18 +1923,25 @@ def run_fetch(pw, doi: str, out: Path) -> bool:
                 print("[fetch] ⚠ but holdings says SUBSCRIBED → worth adding a route (first "
                       "check the 'no route, reason established' list at the bottom of ROUTES "
                       "— it may be a known library-side proxy issue)", file=sys.stderr)
-            return False
+            return "no_route"
 
         st = attempt()
         if st == "pdf":
-            return True
+            _content_check(out, title)
+            return "ok"
         if st == "auth":
             print("[fetch] auth expired → fresh login (refreshes proxy authorization), "
                   "then one retry", file=sys.stderr)
-            if login(page) and attempt() == "pdf":
-                return True
+            if login(page):
+                if attempt() == "pdf":
+                    _content_check(out, title)
+                    return "ok"
+            else:
+                print("[fetch] re-login failed → authentication problem, not a missing "
+                      "route", file=sys.stderr)
+                return "auth"
         print(f"[fetch] {kind} route could not fetch {doi}.{_sfx_hint(doi)}", file=sys.stderr)
-        return False
+        return "fail"
     finally:
         ctx.close()
 
@@ -1911,13 +2027,25 @@ def print_routes() -> None:
                   f"{r.get('journal') or r.get('doi')}"
                   f" · {r.get('status')} · covered={r.get('covered')}")
 
-    print("\n=== Holdings gaps (subscribed, but no proxy route) ===")
+    print("\n=== Holdings gaps (no proxy route) ===")
     gaps = sorted({r["prefix"] for r in recs
                    if r["prefix"] not in ROUTES and r.get("subscribed")})
     for p in gaps:
         print(f"  ⚠  {p} — subscribed articles hit it, but ROUTES has no entry → add one")
     if not gaps:
         print("  ✅ no 'subscribed but routeless' prefix in the access log")
+    # ==Also list routeless prefixes whose entitlement is UNKNOWN.== `subscribed=None`
+    # just means the journal isn't in the A-Z table — database-level platforms look
+    # exactly like this and fetch fine. Filtering the gap list on `subscribed` truthiness
+    # hid 10.1210 (Endocrine Society) for two runs while those papers were fetched by hand.
+    unknown = sorted({r["prefix"] for r in recs
+                      if r["prefix"] not in ROUTES and not r.get("subscribed")})
+    for p in unknown:
+        hits = sum(1 for r in recs if r["prefix"] == p and r.get("status") == "no_route")
+        j = next((r.get("journal") for r in recs
+                  if r["prefix"] == p and r.get("journal")), "")
+        print(f"  ·  {p} — no route, entitlement unknown (×{hits}) {j[:50]}"
+              "  → not in the A-Z table ≠ no access; worth one manual probe")
     print("\n  Known deliberate absences (see the note at the bottom of ROUTES):")
     print("    prefixes can be missing because there is genuinely no online entitlement,")
     print("    or because the LIBRARY's proxy has the subdomain unregistered "
@@ -1928,6 +2056,25 @@ def print_routes() -> None:
 
 # --- CLI ------------------------------------------------------------------
 def main(argv):
+    if not argv:
+        print(__doc__)
+        return 1
+    # `--title "<article title>"` (fetch only) turns on content verification: is the PDF
+    # we got actually this article, or the whole supplement it sits in? See _content_check.
+    title = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--title":
+            i += 1
+            title = argv[i] if i < len(argv) else None
+        elif a.startswith("--title="):
+            title = a.split("=", 1)[1]
+        else:
+            rest.append(a)
+        i += 1
+    argv = rest
     if not argv:
         print(__doc__)
         return 1
@@ -1943,7 +2090,7 @@ def main(argv):
         print(f"unknown command: {cmd}")
         return 1
     if cmd == "fetch" and len(argv) < 3:
-        print("usage: fetch <DOI> <out.pdf>")
+        print('usage: fetch <DOI> <out.pdf> [--title "<article title>"]')
         return 1
 
     from patchright.sync_api import sync_playwright   # stealth fork — passes Cloudflare
@@ -1960,7 +2107,9 @@ def main(argv):
             with sync_playwright() as pw:
                 _mark("driver up")
                 if cmd == "fetch":
-                    return 0 if run_fetch(pw, argv[1], Path(argv[2])) else 2
+                    # 0 ok · 2 route ran but came back empty · 3 auth · 6 no route
+                    return {"ok": 0, "fail": 2, "auth": 3,
+                            "no_route": 6}[run_fetch(pw, argv[1], Path(argv[2]), title)]
 
                 # `login` needs a real window: the proxy's JS-redirect interstitial
                 # never completes headless. `check` only hits the gate's login page → headless.
@@ -1971,10 +2120,10 @@ def main(argv):
                     if cmd == "check":
                         ok = is_logged_in(page)
                         print("session: VALID" if ok else "session: EXPIRED (run: login)")
-                        return 0 if ok else 2
+                        return 0 if ok else 3
                     ok = ensure_login(page)     # cmd == "login"
                     print("login: OK" if ok else "login: FAILED")
-                    return 0 if ok else 2
+                    return 0 if ok else 3
                 finally:
                     ctx.close()
         finally:
