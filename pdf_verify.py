@@ -73,6 +73,10 @@ def norm(s: str) -> str:
 
     斷字是排版造成的，不是內容差異；不接回來的話，真命中會平白掉掉一截長度。"""
     s = re.sub(r"-\s+", "", s or "")
+    # NFKC first: PDF ligatures (ﬁ/ﬂ/ﬀ) otherwise get stripped and "beneﬁt" ≠ "benefit"
+    # (Bone Rep 2022 abstract, 2026-08-31: title_absent on a page that held the whole abstract).
+    import unicodedata
+    s = unicodedata.normalize("NFKC", s)
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", s.lower()).split())
 
 

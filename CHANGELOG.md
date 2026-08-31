@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] — 2026-08-31
+
+Re-running the three remaining "1-page `ok`" files from the same systematic-review batch with
+1.5.1. Two of them turned out to be legitimate single pages (a Lancet *In Focus* news item; an
+ECTS abstract that sits whole on the page it shares with two others) — the page-count
+heuristic was right to warn and not block. The third exposed two small bugs on the way to the
+honest answer (the journal simply is not in the library's ClinicalKey subscription).
+
+### Fixed
+- **`_crossref_pii` rejected PIIs whose ISSN check digit is `X`.** The pattern
+  `[SB][0-9]{15}[0-9X]` only allowed an `X` in the last position, so `S1530891X26010232`
+  (Endocrine Practice, ISSN 1530-891X) was silently dropped and the `ck` route reported
+  "CrossRef alternative-id empty" although CrossRef had answered. Now
+  `[SB][0-9]{7}[0-9X][0-9]{7}[0-9X]`.
+- **`pdf_verify` did not NFKC-normalise page text**, so PDF ligatures (ﬁ/ﬂ/ﬀ) were stripped
+  to a space and "beneﬁt" no longer matched "benefit" — an abstract that was entirely on the
+  page verified as `title_absent 58%`. Same file now `match 100%`.
+
+### Known
+- `ck_webbridge_fallback.py` assumes the user's own browser carries a remember-me token and
+  never sees the organization modal. It does see it (2026-08-31); until the modal handling is
+  ported over from `library_session.py`, pick the institution by hand when the log shows
+  `modal=True verifying=True`.
+
 ## [1.5.1] — 2026-08-31
 
 One retrieval from a systematic-review retry batch exposed a third way the Elsevier TDM API

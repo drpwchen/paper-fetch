@@ -1696,7 +1696,9 @@ def _crossref_pii(doi: str) -> str | None:
         return None
     for aid in msg.get("alternative-id") or []:
         cand = re.sub(r"[^A-Za-z0-9X]", "", aid)
-        if re.fullmatch(r"[SB][0-9]{15}[0-9X]", cand):
+        # PII = S + ISSN (8 chars, check digit may be X) + YY + NNNNN + check digit (may be X);
+        # e.g. S1530891X26010232 (Endocr Pract, ISSN 1530-891X) — the X can sit at position 9.
+        if re.fullmatch(r"[SB][0-9]{7}[0-9X][0-9]{7}[0-9X]", cand):
             return cand
     return None
 
