@@ -15,7 +15,8 @@ Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用
 JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
                 partial_path?, reject_reason?, oa_claimed?, verify?, verify_detail?,
                 volume_path?, extracted_pages?, elapsed_s}
-「有效 PDF」＝ magic bytes ＋內容驗證（頁數/抽出字量；擋 in-press 的 1 頁 pre-proof 封面）。
+「有效 PDF」＝ magic bytes ＋內容驗證（頁數/抽出字量；擋 in-press 的 1 頁 pre-proof 封面）；
+Elsevier TDM 另看 `X-ELS-Status` 回應 header——未授權的 DOI 會回 HTTP 200 ＋只有第一頁的 PDF。
 未過驗證的回應存 <out>.partial、reject_reason 進 envelope，階梯繼續往下走。
 
 ==給了 --title 才有第二層（內容層）驗證==：位元組層分不出「這篇文章」與「這篇文章所在的
@@ -124,7 +125,29 @@ def pdf_gate(content: bytes):
         return False, f"1 頁 ARTICLE IN PRESS 預覽（{len(text)} 字元）— 出版社尚無全文可給"
     if len(text) < 3000:
         return False, f"單頁且僅 {len(text)} 字元 — 疑似封面/摘要頁"
+    # A single page with no reference section is what a first-page-only preview looks like
+    # (the Elsevier TDM API serves exactly that for DOIs the key is not entitled to — the
+    # real first page, cut off mid-Introduction, title intact, 5k+ chars, so everything
+    # above passes). The bytes alone cannot settle it: a genuine one-page news item or
+    # editorial looks the same (Lancet "In Focus", 2026-08-31 corpus). So this is a WARNING,
+    # not a rejection — route_elsevier has the authoritative signal (the X-ELS-Status
+    # response header) and rejects there; other routes' one-pagers stay accepted.
+    if not _has_reference_section(text):
+        print(f"  ⚠ 單頁且無參考文獻段（{len(text)} 字元）— 若不是 letter/news 類短文，"
+              "多半是只給第一頁的預覽，請人工確認")
     return True, None
+
+
+_REF_HEADING = re.compile(r"\b(references?|reference list|bibliography|literature cited|"
+                          r"works cited)\b", re.I)
+_REF_NUMBERED = re.compile(r"^\s*\[?\d{1,3}[\].)]\s+\S", re.M)  # "1. Smith…" / "[1] Smith…"
+
+
+def _has_reference_section(text: str) -> bool:
+    """A reference-list heading, or ≥3 numbered-citation lines (letters often skip the heading)."""
+    if _REF_HEADING.search(text):
+        return True
+    return len(_REF_NUMBERED.findall(text)) >= 3
 
 
 def valid_pdf(content: bytes) -> bool:
@@ -160,7 +183,27 @@ def route_elsevier(doi):
     except Exception as e:
         print(f"  Elsevier 連線失敗: {e}")
         return None
-    print(f"  Elsevier TDM: HTTP {r.status_code} · {len(r.content)} bytes")
+    els_status = r.headers.get("X-ELS-Status", "")
+    print(f"  Elsevier TDM: HTTP {r.status_code} · {len(r.content)} bytes · X-ELS-Status: "
+          f"{els_status or '-'}")
+    # Entitlement is announced in a response header, not in the status code (2026-08-31,
+    # 10.1016/j.jdiacomp.2024.108718): for a DOI the key has no full-text rights to, the API
+    # still answers HTTP 200 + a real %PDF — but only the FIRST PAGE, and it says so:
+    #   X-ELS-Status: WARNING - Response limited to first page because requestor not entitled to resource
+    # (an entitled article gets `X-ELS-Status: OK`). That first page has the title, authors,
+    # abstract and the start of the Introduction — enough to pass every content heuristic
+    # and a title match — so without reading the header it was returned as the article and
+    # the institutional route (which may well be entitled) never ran. The Article
+    # Entitlement API would be the cleaner check, but it is not enabled for TDM keys
+    # (403 AUTHENTICATION_ERROR), so the header is the signal.
+    if r.status_code == 200 and "not entitled" in els_status.lower():
+        global _LAST_REJECT
+        reason = ("Elsevier TDM 只給第一頁（X-ELS-Status: not entitled — 這把 key 對此篇無全文"
+                  "授權）— 非全文；機構訂閱（ClinicalKey）可能仍拿得到")
+        print(f"  ✗ {reason} → 續走下一路線")
+        if is_pdf(r.content):
+            _LAST_REJECT = (r.content, reason)
+        return None
     return r.content if r.status_code == 200 and valid_pdf(r.content) else None
 
 

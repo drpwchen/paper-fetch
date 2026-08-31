@@ -69,6 +69,12 @@ CLI:
                                                        # ...plus content verification:
                                                        # is this the article, or the whole
                                                        # supplement it sits in? (pdf_verify)
+    python library_session.py fetch <DOI> <out.pdf> --skip-layer1
+                                                       # go straight to the proxy route —
+                                                       # for when layer 1 (OA/TDM) returned
+                                                       # something the gate let through but
+                                                       # a human can see is not the article
+                                                       # (env: PAPERFETCH_SKIP_LAYER1=1)
     python library_session.py stats                    # access-log summary / block analysis
     python library_session.py routes                   # per-route scorecard + holdings gaps
 
@@ -254,6 +260,21 @@ ROUTES: dict[str, dict] = {
     # second succeeds. If this route logs cf_block, add `"nav": True` (and keep the
     # one built-in retry in mind — it is what covers the bounce).
     "10.1210": {"kind": "meta"},                                 # Endocrine Society
+    # Bioscientifica (J Endocrinol / J Mol Endocrinol / Endocrine Connections / JOP ...) -
+    # ==the same Silverchair platform as 10.1093 and 10.1210==: doi.org lands on
+    # journals.bioscientifica.com/joe/article/<vol>/<issue>/<eid>/<id>/<slug>, which is the
+    # Silverchair article-URL shape, so the citation_pdf_url route applies unchanged. Added
+    # 2026-08-29: 10.1530/joe-25-0081 had been logged `not_retrieved` with exit 6, and exit 6
+    # is "no route for this prefix", never evidence about the paper. A plain request to the
+    # landing page answers HTTP 403 with a Cloudflare "Just a moment" body. Headless was tried
+    # first and the resolver logged `cf_challenge (http 403, nav=False)`, so this route carries
+    # `nav: True` like BMJ/AJNR/JNM - their WAF passes a real navigation and refuses everything
+    # else. Not in the A-Z holdings table -> entitlement UNKNOWN, not no-go; a `fail` here means
+    # "a route ran and came back empty", which is the first honest evidence this article has
+    # ever had (it was previously logged not_retrieved on exit 6 = no route for this prefix).
+    # 2026-08-31 outcome: even headful nav got 403 (publisher 24h request-cap notice) and SFX
+    # lists no full-text target → the reference library has no subscription; not a tool bug.
+    "10.1530": {"kind": "meta", "nav": True},                    # Bioscientifica
     # --- meta + headful nav (Cloudflare blocks headless) ---
     # BMJ: headless is definitely blocked; headful `nav` passed on the first try when the
     # route was added (2026-07-14). ==It is not passing reliably any more== — 2026-08-21/22
@@ -271,7 +292,11 @@ ROUTES: dict[str, dict] = {
     # --- ck (ClinicalKey, headful — see _ck_pdf for why) ---
     # 10.1016 Elsevier: paper_fetch's TDM API still goes first (layer 1) and covers most
     # articles. This route is the fallback for what TDM cannot serve: in-press articles
-    # (TDM returns a cover sheet that pdf_gate rejects) and ClinicalKey-only titles.
+    # (TDM returns a cover sheet that pdf_gate rejects), published articles the TDM key has
+    # no entitlement for (TDM returns HTTP 200 + the FIRST PAGE ONLY, flagged by the
+    # `X-ELS-Status: WARNING … not entitled` response header — route_elsevier rejects on
+    # that header since 1.5.1), and ClinicalKey-only titles. `fetch --skip-layer1` forces
+    # this route when layer 1 is wrong in a way no check catches.
     # ScienceDirect-via-proxy is NOT an equivalent fallback — SD and CK are separate
     # subscriptions (the reference library holds 5 SD journals vs 953 CK journals).
     "10.1016": {"kind": "ck"},
@@ -1688,11 +1713,13 @@ def _ck_pdf(page, doi: str, out: Path) -> str:
       with gate cookies alone it answers HTTP 902 + JSON. So: navigate once, let the SPA
       boot, and poll the PDF endpoint from the same context (500s while booting are
       normal — the second poll typically succeeds).
-    - Entering CK shows a "选择机构 / Choose organization" modal whose options are
-      `button.pseudo-label` elements (NOT radio inputs). Pick by config
-      `clinicalkey.institution_match`. Its "remember" box does NOT persist in this
-      profile (observed: the modal reappears every run) — the route just handles it
-      each time.
+    - Entering CK shows a "选择机构 / Choose organization" modal (csas status=PATH_CHOICE).
+      Its DOM has changed once already (`button.pseudo-label` → radio group
+      `input[name=path_choice_select]`, 2026-08-31); the poll loop handles both and picks
+      by config `clinicalkey.institution_match`. ==If the route ever logs boot_timeout with
+      the PDF endpoint at HTTP 500 and no "institution picked" line, suspect the modal
+      selector first== — dump the DOM (see `_scratch/ck_diag4.py`), don't assume CK is down.
+      The "remember" box is ticked; whether it persists is profile-dependent.
     - A synthetic click on the SPA's own download link does NOT trigger a download —
       fetch the PDF URL directly instead. PII for the URL comes from _crossref_pii.
     """
@@ -1729,14 +1756,51 @@ def _ck_pdf(page, doi: str, out: Path) -> str:
     while time.time() < deadline:
         page.wait_for_timeout(CK_POLL_S * 1000)
         tries += 1
-        # Institution-choice modal (first entry per profile only)
+        # Institution-choice modal. The SPA's /auth/csas/session answers status=PATH_CHOICE
+        # with N path_choices and renders a "选择机构 / Choose organization" modal; until one
+        # is submitted, every /service/* call (the PDF endpoint included) is a Tomcat 500 and
+        # the header shows「访问验证…」forever. Two DOM generations seen:
+        #   · ≤2026-08-19: options are `button.pseudo-label`
+        #   · master-248835a (2026-08-31): a radio group `input[name=path_choice_select]`
+        #     with the label text in `.path-choice-text`, a "记住这个机构" checkbox and a
+        #     `button.submit-button` (继续). The old selector matched nothing, so the route
+        #     polled 12× into boot_timeout while the modal sat there the whole time —
+        #     the user's own browser (remember-me token → status=INITIALIZED) sailed through.
+        # The remember box is ticked so later runs skip the choice like that browser does.
         try:
-            if page.evaluate("!!document.querySelector('button.pseudo-label')"):
+            if page.evaluate("!!document.querySelector("
+                             "'button.pseudo-label, input[name=path_choice_select]')"):
                 res = json.loads(page.evaluate(
                     """(inst) => {
+                        const rx = inst ? new RegExp(inst,'i') : null;
+                        const radios=[...document.querySelectorAll('input[name=path_choice_select]')];
+                        if (radios.length) {
+                            const opts = radios.map(r => {
+                                const box = r.closest('.c-els-field') || r.parentElement;
+                                const t = ((box && box.querySelector('.path-choice-text, label')) || box || r)
+                                          .textContent.trim();
+                                return {r, t};
+                            });
+                            const pick = rx ? opts.find(o=>rx.test(o.t))
+                                            : (opts.length===1 ? opts[0] : null);
+                            if(!pick) return JSON.stringify(
+                                {picked:null, options:opts.map(o=>o.t.slice(0,90))});
+                            pick.r.click();
+                            if(!pick.r.checked){ pick.r.checked=true;
+                                pick.r.dispatchEvent(new Event('change',{bubbles:true})); }
+                            const form = pick.r.closest('form') || document;
+                            const remember = form.querySelector('input[type=checkbox]');
+                            if (remember && !remember.checked) remember.click();
+                            const cont = form.querySelector('button.submit-button, button[type=submit]')
+                                || [...form.querySelectorAll('button')]
+                                     .find(b=>/继续|繼續|continue/i.test(b.textContent));
+                            if(cont) cont.click();
+                            return JSON.stringify({picked:pick.t.slice(0,90), cont:!!cont,
+                                                   ui:'radio', remember:!!remember});
+                        }
                         const btns=[...document.querySelectorAll('button.pseudo-label')];
-                        const pick=inst?btns.find(b=>new RegExp(inst,'i').test(b.textContent))
-                                       :(btns.length===1?btns[0]:null);
+                        const pick=rx?btns.find(b=>rx.test(b.textContent))
+                                     :(btns.length===1?btns[0]:null);
                         if(!pick) return JSON.stringify(
                             {picked:null,options:btns.map(b=>b.textContent.trim().slice(0,90))});
                         pick.click();
@@ -1747,10 +1811,11 @@ def _ck_pdf(page, doi: str, out: Path) -> str:
                             ||form.querySelector('button[type=submit]');
                         if(cont)cont.click();
                         return JSON.stringify({picked:pick.textContent.trim().slice(0,90),
-                                               cont:!!cont});
+                                               cont:!!cont, ui:'pseudo-label'});
                     }""", CK_INSTITUTION))
                 if res.get("picked"):
-                    print(f"[ck] institution picked: {res['picked']}", file=sys.stderr)
+                    print(f"[ck] institution picked ({res.get('ui')}): {res['picked']}",
+                          file=sys.stderr)
                 elif res.get("options"):
                     print("[ck] institution modal has several options and "
                           "`clinicalkey.institution_match` (config.yaml) matched none:",
@@ -1800,6 +1865,19 @@ def _ck_pdf(page, doi: str, out: Path) -> str:
     return "fail"
 
 
+def _drop_stale_partial(out: Path) -> None:
+    """Layer 1 leaves its gate-rejected bytes as `<out>.partial` (cover sheet / TDM preview).
+    Once the proxy route has produced the real article that file is only a trap for the next
+    reader — a regenerable download, so a direct unlink is fine."""
+    partial = out.with_name(out.name + ".partial")
+    if partial.exists():
+        try:
+            partial.unlink()
+            print(f"[fetch] removed layer-1 reject {partial.name} (superseded)", file=sys.stderr)
+        except OSError:
+            pass
+
+
 def _sfx_hint(doi: str) -> str:
     return f" SFX: {SFX.format(doi=doi)}" if SFX else ""
 
@@ -1837,9 +1915,14 @@ def _content_check(out: Path, title: str | None) -> None:
                   f"({cut['reason']}) — file left as is, check by hand", file=sys.stderr)
 
 
-def run_fetch(pw, doi: str, out: Path, title: str | None = None) -> str:
+def run_fetch(pw, doi: str, out: Path, title: str | None = None,
+              skip_layer1: bool = False) -> str:
     """Three-layer ladder: ① paper_fetch's API/OA/TDM (no proxy) → ② holdings entitlement
     pre-check → ③ dispatch the proxy route by ROUTES[prefix]["kind"] (tpl / meta / lww).
+
+    `skip_layer1` is the human override for ①: the content gate is heuristic, and when it
+    lets a non-article through (a 1-page TDM preview did exactly that on 2026-08-31) the
+    only way to reach the proxy route was to edit the code. Now it's a flag.
 
     ==Returns a REASON, not a bool==: "ok" | "auth" (session/login problem) | "no_route"
     (no route for this publisher) | "fail" (a route ran and came back empty). main() maps
@@ -1865,7 +1948,11 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None) -> str:
     _mark("new_page OK")
     try:
         # Layer 1 — API/OA/TDM (no proxy, no CF, no login). Works out of the box.
-        if _try_paper_fetch(doi, out, title):
+        if skip_layer1:
+            print("[fetch] --skip-layer1 → OA/TDM layer skipped, going to the proxy route",
+                  file=sys.stderr)
+            _log({"kind": "api", "doi": doi, "status": "skipped"})
+        elif _try_paper_fetch(doi, out, title):
             print(f"[fetch] got via API/OA/TDM route -> {out}", file=sys.stderr)
             return "ok"
         if not ensure_login(page):
@@ -1928,6 +2015,7 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None) -> str:
         st = attempt()
         if st == "pdf":
             _content_check(out, title)
+            _drop_stale_partial(out)
             return "ok"
         if st == "auth":
             print("[fetch] auth expired → fresh login (refreshes proxy authorization), "
@@ -1935,6 +2023,7 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None) -> str:
             if login(page):
                 if attempt() == "pdf":
                     _content_check(out, title)
+                    _drop_stale_partial(out)
                     return "ok"
             else:
                 print("[fetch] re-login failed → authentication problem, not a missing "
@@ -2062,6 +2151,7 @@ def main(argv):
     # `--title "<article title>"` (fetch only) turns on content verification: is the PDF
     # we got actually this article, or the whole supplement it sits in? See _content_check.
     title = None
+    skip_layer1 = os.environ.get("PAPERFETCH_SKIP_LAYER1") == "1"
     rest = []
     i = 0
     while i < len(argv):
@@ -2071,6 +2161,8 @@ def main(argv):
             title = argv[i] if i < len(argv) else None
         elif a.startswith("--title="):
             title = a.split("=", 1)[1]
+        elif a == "--skip-layer1":
+            skip_layer1 = True
         else:
             rest.append(a)
         i += 1
@@ -2090,7 +2182,7 @@ def main(argv):
         print(f"unknown command: {cmd}")
         return 1
     if cmd == "fetch" and len(argv) < 3:
-        print('usage: fetch <DOI> <out.pdf> [--title "<article title>"]')
+        print('usage: fetch <DOI> <out.pdf> [--title "<article title>"] [--skip-layer1]')
         return 1
 
     from patchright.sync_api import sync_playwright   # stealth fork — passes Cloudflare
@@ -2109,7 +2201,8 @@ def main(argv):
                 if cmd == "fetch":
                     # 0 ok · 2 route ran but came back empty · 3 auth · 6 no route
                     return {"ok": 0, "fail": 2, "auth": 3,
-                            "no_route": 6}[run_fetch(pw, argv[1], Path(argv[2]), title)]
+                            "no_route": 6}[run_fetch(pw, argv[1], Path(argv[2]), title,
+                                                     skip_layer1=skip_layer1)]
 
                 # `login` needs a real window: the proxy's JS-redirect interstitial
                 # never completes headless. `check` only hits the gate's login page → headless.

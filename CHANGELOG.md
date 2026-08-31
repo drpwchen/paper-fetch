@@ -5,6 +5,56 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] — 2026-08-31
+
+One retrieval from a systematic-review retry batch exposed a third way the Elsevier TDM API
+can hand back "a valid PDF that is not the article" — and this one passed every check: the
+real first page of a *published* article, title intact, 5k characters, cut off
+mid-Introduction. Layer 1 returned it as the full text; the ClinicalKey route, which the
+library *is* entitled to, never ran. Three more such files were then found sitting in that
+project's full-text folder logged `ok · match`. Fixing that revealed the second bug: once the
+`ck` route finally ran, it timed out — the SPA's organization modal had changed shape.
+
+### Fixed
+- **`ck` route: the organization-choice modal is a radio group now.** ClinicalKey's
+  `/auth/csas/session` answers `status=PATH_CHOICE` and renders「选择机构」; UI build
+  `master-248835a` draws it as `input[name=path_choice_select]` + a `submit-button`, no longer
+  as `button.pseudo-label`. The route's selector matched nothing, so it polled the PDF endpoint
+  twelve times into `boot_timeout` while the modal sat there — and the log read exactly like
+  "ClinicalKey is down" (Tomcat 500 on every `/service/*` call, header stuck on「访问验证…」).
+  Both DOM generations are handled; the "remember this organization" box is ticked so later
+  runs get `status=INITIALIZED` straight away. Diagnosed by comparing the automation profile
+  with the user's own browser, where the same URL worked because it carried a remember-me
+  token. Verified: institution picked, PDF on the first probe, `--title` match.
+- **`route_elsevier` reads the `X-ELS-Status` response header.** For a DOI the TDM key is
+  not entitled to, the API answers HTTP 200 + a first-page-only PDF and says so:
+  `WARNING - Response limited to first page because requestor not entitled to resource`
+  (entitled articles get `OK`). That response is now a rejection — kept as `.partial`, the
+  ladder continues, `library_session.py` reaches `ck`. Verified on 4 such DOIs vs 1 entitled
+  control; the Article Entitlement API would be the cleaner signal but is `403` for TDM keys.
+- `pdf_gate` prints a warning for a single-page PDF with no reference section (what a
+  first-page preview looks like). Warning, not rejection: a genuine one-page news item or
+  editorial is indistinguishable from the bytes alone, and the header settles the Elsevier
+  case where it matters.
+
+### Added
+- **`library_session.py fetch … --skip-layer1`** (or `PAPERFETCH_SKIP_LAYER1=1`): go straight
+  to the proxy route. The human override for when layer 1 returns something no check catches
+  — the retry agent wanted exactly this and had no way to ask for it.
+- When the proxy route succeeds after layer 1 left a gate-rejected `<out>.pdf.partial`, that
+  stale reject is removed so it cannot be mistaken for the article later.
+- `10.1530` (Bioscientifica — J Endocrinol et al.) as a `meta, nav` route: the same Silverchair
+  shape as OUP/Endocrine Society. Ported from the live deployment (added there 2026-08-29); at
+  the reference library it ends in a Cloudflare 403 + no SFX target = no subscription, which is
+  the first *honest* verdict that DOI had (it used to log exit `6`, "no route").
+
+### Changed
+- `README.md`, `docs/publisher-tdm-apis.md`, the skill and the `10.1016` route comment now
+  describe the header, the `--skip-layer1` override, and the fact that a `%PDF` + title match
+  is not proof of full text. `AGENTS.md` gains a fifth corollary: when the automation profile
+  fails where the user's own browser succeeds on the same URL, diff the two before blaming
+  the publisher.
+
 ## [1.5.0] — 2026-08-22
 
 Everything here comes from one 147-paper systematic-review retrieval run, which surfaced two

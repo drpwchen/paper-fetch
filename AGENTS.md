@@ -78,6 +78,14 @@ Fourth: **"no `citation_pdf_url`" is not "no route".** Some entitled articles si
 the tag (Nature news/comment items). A `meta` route can take `pdf_from_landing: "{landing}.pdf"`
 to derive the PDF URL from the article URL instead of giving up.
 
+Fifth: **a headful SPA route that "times out" may be waiting on a modal you can no longer see.**
+The `ck` route logged `boot_timeout` with the PDF endpoint at HTTP 500 on every poll — reads
+like "ClinicalKey is down". The SPA had simply redrawn its organization-choice modal (buttons →
+radio inputs) and the selector matched nothing; the user's own browser sailed through because
+it carried a remember-me token. When an automation profile fails where a human's browser
+succeeds on the *same URL*, diff the two — response bodies of the auth call, then the DOM —
+before blaming the publisher.
+
 ## Calling it from an orchestrator
 
 - `paper_fetch.py --json <DOI> <out>` prints **exactly one JSON envelope on stdout** (all

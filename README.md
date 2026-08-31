@@ -82,7 +82,11 @@ working code:
 
 `10.1016` Elsevier tries the TDM API in `paper_fetch.py` first; the `ck` route is the
 fallback for what TDM cannot serve — *in press* articles (TDM returns a cover sheet the
-content gate rejects) and ClinicalKey-only titles.
+content gate rejects), articles the TDM key is **not entitled to** (TDM answers HTTP 200 with
+the *first page only* and says so in the `X-ELS-Status` response header; `route_elsevier`
+reads that header and falls through), and ClinicalKey-only titles. If layer 1 ever returns
+something no check catches, `library_session.py fetch … --skip-layer1` goes straight to the
+proxy route.
 
 **Adding a new publisher? Reach for the `citation_pdf_url` route first.** Many sites with no
 DOI→PDF template still advertise the exact PDF URL in a `<meta name="citation_pdf_url">` tag on
