@@ -222,23 +222,23 @@ PERSIST_COOKIES = AUTH.get("persist_cookies") or {
 # a route bug either. `routes` prints the per-prefix scorecard with entitlement attached.
 ROUTES: dict[str, dict] = {
     # --- tpl (one-step template) ---
-    "10.1002": {"kind": "tpl", "host": "onlinelibrary.wiley.com", "path": "/doi/pdfdirect/{doi}?download=true"},  # Wiley (incl. Cochrane 10.1002/14651858)
-    "10.1111": {"kind": "tpl", "host": "onlinelibrary.wiley.com", "path": "/doi/pdfdirect/{doi}?download=true"},  # Wiley
+    "10.1002": {"kind": "tpl", "host": "onlinelibrary.wiley.com", "path": "/doi/pdfdirect/{doi}?download=true", "holdings_pub": "wiley"},  # Wiley (incl. Cochrane 10.1002/14651858)
+    "10.1111": {"kind": "tpl", "host": "onlinelibrary.wiley.com", "path": "/doi/pdfdirect/{doi}?download=true", "holdings_pub": "wiley"},  # Wiley
     # Springer/BMC: the canonical /content/pdf URL 404s while an article is IN PRESS,
     # but the landing page's Download button serves an Article-in-Press proof at
     # {doi}_reference.pdf (observed 2026-08-19: canonical 404, _reference.pdf = 70-page
     # proof). citation_pdf_url still advertises the 404 canonical URL, so a meta route
     # would not find it either — hence the explicit alt path.
-    "10.1007": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf",
+    "10.1007": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf", "holdings_pub": "springer",
                 "alt_paths": ["/content/pdf/{doi}_reference.pdf"]},                                               # Springer
-    "10.1186": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf",
+    "10.1186": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf", "holdings_pub": "springer",
                 "alt_paths": ["/content/pdf/{doi}_reference.pdf"]},                                               # BMC ⚠ real PDF lives on per-journal *.biomedcentral.com, often 404
-    "10.1056": {"kind": "tpl", "host": "www.nejm.org",            "path": "/doi/pdf/{doi}"},                      # NEJM ✅
-    "10.1177": {"kind": "tpl", "host": "journals.sagepub.com",    "path": "/doi/pdf/{doi}?download=true"},        # Sage ✅ (OnlineFirst may sit outside coverage → 403, not a route bug)
-    "10.1080": {"kind": "tpl", "host": "www.tandfonline.com",     "path": "/doi/pdf/{doi}?download=true"},        # Taylor & Francis ✅
+    "10.1056": {"kind": "tpl", "host": "www.nejm.org",            "path": "/doi/pdf/{doi}", "holdings_pub": "new england"},                      # NEJM ✅
+    "10.1177": {"kind": "tpl", "host": "journals.sagepub.com",    "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "sage"},        # Sage ✅ (OnlineFirst outside coverage → 403; unsubscribed journal → reader_html then timeouts — neither is a route bug; holdings lists only 3 Sage titles)
+    "10.1080": {"kind": "tpl", "host": "www.tandfonline.com",     "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "taylor"},        # Taylor & Francis ✅
     "10.2214": {"kind": "tpl", "host": "www.ajronline.org",       "path": "/doi/pdf/{doi}?download=true"},        # AJR (Atypon) ✅ (meta route has no citation_pdf_url)
-    "10.1148": {"kind": "tpl", "host": "pubs.rsna.org",           "path": "/doi/pdf/{doi}?download=true"},        # Radiology / RSNA ✅
-    "10.1142": {"kind": "tpl", "host": "www.worldscientific.com", "path": "/doi/pdf/{doi}?download=true"},        # World Scientific ✅
+    "10.1148": {"kind": "tpl", "host": "pubs.rsna.org",           "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "radiological"},        # Radiology / RSNA ✅
+    "10.1142": {"kind": "tpl", "host": "www.worldscientific.com", "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "world scientific"},        # World Scientific ✅
     # --- meta (resolver → citation_pdf_url) ---
     "10.1001": {"kind": "meta"},                                 # JAMA Network ✅
     "10.1093": {"kind": "meta"},                                 # Oxford (OUP) ✅
@@ -985,6 +985,67 @@ def _entitlement(doi: str) -> dict:
         return {}
 
 
+SPARSE_PLATFORM_MAX = 10   # a holdings platform with ≤ this many journals is "a la carte"
+
+
+def _platform_count(pattern: str | None) -> int | None:
+    """Subscribed-journal count for the holdings platform(s) matching `pattern`
+    (ROUTES[...]["holdings_pub"]); None when unknown / no table / no pattern."""
+    if not pattern:
+        return None
+    try:
+        import holdings
+        return holdings.platform_count(pattern)
+    except Exception as e:
+        print(f"[holdings] platform count skipped ({repr(e)[:60]})", file=sys.stderr)
+        return None
+
+
+# tpl statuses that can mean "the proxy's per-subdomain authorization lapsed" — the ONLY
+# thing a fresh login fixes. Everything else (timeout, CF, rate limit, reader HTML on an
+# unentitled journal) gets worse with a retry, not better.
+_TPL_AUTH_LIKE = {"auth_expired", "http_401", "http_403", "http_302"}
+
+
+def _tpl_verdict(status: str, sub, covered, suspect_unsub: bool, doi: str) -> str:
+    """Map a tpl status onto run_fetch's "pdf" / "auth" (retry once after login) / "fail"
+    (final — say why, and say what NOT to do next).
+
+    2026-09-01 lesson (Sage, J Appl Gerontol, not subscribed): reader HTML → re-login →
+    reader HTML again; then a `--title` retry → 30 s timeout ×2. Four requests, one minute,
+    zero information gained after the first response. `--title` only changes verification
+    of a PDF we already have; it cannot change whether we get one."""
+    if status == "pdf":
+        return "pdf"
+    if status in _TPL_AUTH_LIKE:
+        return "auth"
+    if status == "reader_html":
+        # A subscribed, in-coverage journal handing back HTML is the one case where the
+        # per-subdomain proxy auth may have lapsed → worth a single re-login retry.
+        if sub is True and covered is not False and not suspect_unsub:
+            print("[fetch] reader HTML on a journal holdings says is subscribed+covered → "
+                  "one fresh-login retry (per-subdomain proxy auth may have lapsed)",
+                  file=sys.stderr)
+            return "auth"
+        why = ("年份在 coverage 外" if covered is False else
+               "疑無訂閱（holdings 平台稀疏且本刊不在表）" if suspect_unsub else
+               "多半是無訂閱")
+        print(f"[fetch] 出版社回的是閱讀器／摘要頁而非 PDF → {why}。這不是路線壞、不是認證問題；"
+              f"==不要帶 --title 重試==（--title 只影響驗證，不影響取得）。"
+              f"下一步：SFX 手動或跟作者要。{_sfx_hint(doi)}", file=sys.stderr)
+        return "fail"
+    if status == "timeout":
+        print("[fetch] proxy 30 s 無回應。不重試：先 `library_session.py check`；session VALID "
+              "的話多半是出版社對 proxy 節流或無訂閱（Sage 對無權限請求會拖到 timeout），"
+              f"等幾分鐘或直接走 SFX。{_sfx_hint(doi)}", file=sys.stderr)
+        return "fail"
+    if status in ("cf_challenge", "cf_block", "rate_limited", "proxy_host_unregistered",
+                  "redirect_loop", "request_error", "no_response", "unknown_prefix"):
+        return "fail"     # _warn_if_blocked / _proxy_pdf already said what it is
+    # Unrecognised http_* (5xx, odd 4xx): keep the historical one-retry behaviour.
+    return "auth"
+
+
 def _proxy_host(publisher_host: str) -> str:
     """onlinelibrary.wiley.com -> onlinelibrary-wiley-com.<proxy_suffix>"""
     return f"{publisher_host.replace('.', '-')}.{PROXY_SUFFIX}"
@@ -1011,7 +1072,30 @@ def _classify(resp, body: bytes) -> str:
     # to the library; it is NOT a route bug on our side.
     if b"host does not match" in head or b"oh noes" in head:
         return "proxy_host_unregistered"
+    # 200 with an HTML body = the publisher served its reader/abstract page instead of the
+    # PDF. Nine times out of ten that is ENTITLEMENT (journal not subscribed, or this year
+    # outside coverage) — not a route bug, not auth. Naming it `http_200` (2026-09-01, Sage
+    # J Appl Gerontol) made it look like a mystery worth re-login + retry; it never is.
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if resp.status == 200 and ("text/html" in ctype or b"<html" in head
+                               or b"<!doctype html" in head):
+        return "reader_html"
     return f"http_{resp.status}"
+
+
+# Phrases publishers put on the reader page when the viewer is NOT entitled. Purely a hint
+# for the log/stdout ("paywall marker seen") — absence proves nothing, presence is strong.
+_PAYWALL_MARKERS = (b"access options", b"get access", b"purchase access", b"buy article",
+                    b"purchase this article", b"rent this article", b"institutional login",
+                    b"sign in to access", b"access through your institution")
+
+
+def _paywall_marker(body: bytes) -> str | None:
+    low = body[:400_000].lower()
+    for m in _PAYWALL_MARKERS:
+        if m in low:
+            return m.decode()
+    return None
 
 
 def _classify_exc(e: Exception) -> str:
@@ -1051,15 +1135,20 @@ def _try_paper_fetch(doi: str, out: Path, title: str | None = None) -> bool:
     return ok
 
 
-def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> bool:
+def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> str:
     """tpl route: authenticated proxy. allow_nav=False → silent request.get (phase 1);
-    allow_nav=True → run CF challenge in a real browser first (phase 2)."""
+    allow_nav=True → run CF challenge in a real browser first (phase 2).
+
+    ==Returns the final `_classify` status ("pdf" on success), not a bool.== The caller
+    decides what deserves a fresh-login retry; a bool forced it to retry everything, and
+    on 2026-09-01 that turned one unsubscribed Sage article into four proxy requests
+    (reader HTML ×2, then 30 s timeout ×2)."""
     prefix = doi.split("/")[0]
     route = ROUTES.get(prefix)
     if not route or route.get("kind") != "tpl":
         _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "n/a",
               "status": "unknown_prefix"})
-        return False
+        return "unknown_prefix"
     if not PROXY_SUFFIX:
         sys.exit("config.yaml institution.proxy_suffix is blank — set it to your library's "
                  "proxy suffix to use the proxy path.")
@@ -1079,7 +1168,7 @@ def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> bool:
             if _is_pdf(out):
                 _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": phase,
                       "status": "pdf", "bytes": out.stat().st_size, "via": "download_event"})
-                return True
+                return "pdf"
         except Exception:
             try:
                 page.wait_for_timeout(2500)  # let a non-download CF challenge finish
@@ -1089,30 +1178,34 @@ def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> bool:
     # Primary URL first, then any alt_paths (e.g. Springer's in-press _reference.pdf).
     urls = [url] + [f"https://{_proxy_host(route['host'])}{p.format(doi=doi)}"
                     for p in route.get("alt_paths", [])]
-    status = None
+    status = "no_response"
     for u in urls:
         try:
             resp = page.request.get(u, timeout=NAV_TIMEOUT_MS)
             body = resp.body()
         except Exception as e:
+            status = _classify_exc(e)
             _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": phase,
-                  "status": _classify_exc(e), "note": repr(e)[:100]})
-            return False
+                  "status": status, "note": repr(e)[:100]})
+            print(f"[proxy] {status} ({phase}) — {repr(e)[:80]}", file=sys.stderr)
+            return status
         status = _classify(resp, body)
+        marker = _paywall_marker(body) if status == "reader_html" else None
         _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": phase, "status": status,
               "http": resp.status, "bytes": len(body),
-              "alt": (u != url) or None,
+              "alt": (u != url) or None, "note": marker,
               "cf_ray": resp.headers.get("cf-ray"), "cf_mitigated": resp.headers.get("cf-mitigated")})
         if status == "pdf":
             out.write_bytes(body)
             print(f"[proxy] OK ({phase}) -> {out} ({len(body)} bytes)"
                   + ("（alt path — 可能是 in-press proof 版）" if u != url else ""),
                   file=sys.stderr)
-            return True
+            return "pdf"
         _warn_if_blocked(status)
         print(f"[proxy] {status} ({phase}, http {resp.status}, {len(body)}B)"
+              + (f" · paywall marker「{marker}」" if marker else "")
               + (f" — trying alt path" if u != urls[-1] else ""), file=sys.stderr)
-    return False
+    return status
 
 
 # --- Ovid licence-seat discipline ------------------------------------------
@@ -1969,6 +2062,7 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
         sub, covered = ent.get("subscribed"), ent.get("covered")
         _log({"kind": "holdings", "doi": doi, "prefix": prefix, "subscribed": sub,
               "covered": covered, "platform": ent.get("platform")})
+        suspect_unsub = False   # strong "not subscribed" signal → single attempt, no retry
         if sub:
             print(f"[holdings] {ent.get('platform')} · {ent.get('coverage')}", file=sys.stderr)
             if covered is False:
@@ -1979,9 +2073,20 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
                       f"the proxy will likely return reader HTML (NOT a broken route)",
                       file=sys.stderr)
         elif sub is None:
-            print("[holdings] journal not in the holdings table → entitlement unknown, "
-                  "trying the proxy anyway (database-level platforms look like this)",
-                  file=sys.stderr)
+            # Not in the table. Two very different worlds hide behind that: a database-level
+            # platform the A-Z list never itemises (fetches fine), or a publisher the library
+            # buys three titles from and this isn't one of them. The platform's own journal
+            # count in holdings tells them apart: Wiley 1586 / Springer 320 vs Sage 3, T&F 2.
+            n = _platform_count(route.get("holdings_pub"))
+            if n is not None and n <= SPARSE_PLATFORM_MAX:
+                suspect_unsub = True
+                print(f"[holdings] ⚠ 疑無訂閱：holdings 的「{route['holdings_pub']}」平台只有 {n} 刊，"
+                      f"本刊（{ent.get('journal')}）不在其中 → 只試一次，失敗直接走 SFX，"
+                      f"不要帶 --title 重試", file=sys.stderr)
+            else:
+                print("[holdings] journal not in the holdings table → entitlement unknown, "
+                      "trying the proxy anyway (database-level platforms look like this)",
+                      file=sys.stderr)
         if (sub is False or covered is False) and os.environ.get("PAPERFETCH_SKIP_UNSUB") == "1":
             print(f"[fetch] PAPERFETCH_SKIP_UNSUB=1 → skipping the proxy.{_sfx_hint(doi)}",
                   file=sys.stderr)
@@ -2000,9 +2105,10 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
                 page, doi, out, nav=bool(route.get("nav")), host=route.get("host"),
                 pdf_from_landing=route.get("pdf_from_landing"))
         elif kind == "tpl":
-            # _proxy_pdf returns bool; wrap as "pdf"/"auth". It cannot distinguish auth
-            # expiry, so a failure always gets one fresh-login retry.
-            attempt = lambda: "pdf" if _proxy_pdf(page, doi, out, allow_nav=False) else "auth"
+            # _proxy_pdf returns the _classify status; _tpl_verdict decides whether it is
+            # worth a fresh-login retry ("auth") or final ("fail").
+            attempt = lambda: _tpl_verdict(_proxy_pdf(page, doi, out, allow_nav=False),
+                                           sub, covered, suspect_unsub, doi)
         else:
             _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "n/a",
                   "status": "no_route", "subscribed": sub})

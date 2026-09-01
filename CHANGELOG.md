@@ -5,6 +5,37 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] — 2026-09-01
+
+A batch run from another project asked for a Sage article (*J Appl Gerontol* 2022, 10.1177) the
+library simply does not subscribe to (holdings lists three Sage titles; this is not one). The
+route was fine — but the tool made that fact as expensive as possible to learn: reader HTML was
+logged as `http_200`, treated as a possible auth lapse, re-logged-in and retried (same HTML);
+a second run with `--title` then hit the 30 s proxy timeout twice. Four requests, one minute,
+no new information after the first response. This release makes the first response final.
+
+### Changed
+- **`_classify` names the reader page.** HTTP 200 with an HTML body is now `reader_html`, not
+  `http_200`; when the page carries a paywall phrase ("Access options", "Get access", "Buy
+  article", …) the marker is logged as `note` and printed.
+- **tpl routes no longer retry everything.** `_proxy_pdf` returns the classified status and
+  `_tpl_verdict` decides: only auth-like statuses (`auth_expired`, 401/403/302) earn the
+  fresh-login retry. `reader_html` retries once *only* when holdings says subscribed and in
+  coverage (the per-subdomain proxy-auth case); `timeout`, Cloudflare, rate-limit and
+  reader HTML on an unentitled journal are final, each with a message that says what it is
+  and — explicitly — that `--title` is not a retry lever (it only affects verification of a
+  PDF already in hand).
+- **"疑無訂閱" pre-check.** When the journal is not in the holdings table *and* the publisher's
+  platform holds ≤ 10 titles there (`holdings.platform_count`, new; wired through a
+  `holdings_pub` key on tpl ROUTES entries), the fetch says so before the first request and
+  makes a single attempt. Database-level platforms (Wiley 1586, Springer 320 titles) are
+  unaffected — `subscribed=None` there still means "unknown, try".
+
+### Notes
+- Exit codes are unchanged: all of the above still exits `2` ("route ran, came back empty");
+  the difference is one request instead of four and a stderr line that names the cause.
+- `holdings.py platforms` remains the way to see which publishers are a-la-carte at your library.
+
 ## [1.5.2] — 2026-08-31
 
 Re-running the three remaining "1-page `ok`" files from the same systematic-review batch with

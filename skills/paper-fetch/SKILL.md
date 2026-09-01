@@ -263,6 +263,8 @@ and stop if `stats` shows a block.
 | All auto routes fail (paywall/Cloudflare) | Script prints SFX link → institutional login → manual download → drag onto item |
 | `library_session.py` exit `3`（認證） | `login` 一次（全自動）→ 重跑。**不要記成缺全文**；批次中出現就中止整批 |
 | `library_session.py` exit `6`（無路線） | 查 `holdings.py <DOI>`；訂閱中就值得補 ROUTES，`subscribed=None` 也不代表沒權限 |
+| `library_session.py` 印 `reader_html`／「疑無訂閱」 | 出版社給的是閱讀器頁不是 PDF ＝ **無訂閱或年份在 coverage 外**，不是路線壞、不是認證。==不要帶 `--title` 重跑==（`--title` 只管驗證，不影響取得）→ 記成「無管道」，給 SFX 連結或跟作者要 |
+| `library_session.py` 印 `timeout`（proxy 30 s 無回應） | 先 `check`；session VALID 就是出版社節流／無訂閱（Sage 對無權限請求會拖到 timeout），不要立刻重試，走 SFX |
 | 抓到的 PDF 是整本增刊 | 給 `--title` 就會自動切出該篇（整本留成 `<stem>_volume.pdf`）；或事後 `pdf_verify.py <pdf> --title "…" --extract` |
 | `pdf_verify` 判 `title_absent`／`no_text` | 不自動處理——人工開檔看一眼（掃描件、勘誤頁、抓到別篇都長這樣） |
 | PDF not moving to linked folder | Check ZotMoov `enable_automove`; for already-synced files temporarily set `process_synced_files=true`, then "Move + Convert to Linked" |

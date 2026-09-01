@@ -67,3 +67,11 @@ python holdings.py platforms                      # every platform you subscribe
 (it lives under a separate *database* entry) and yet the proxy serves its PDFs fine. So
 `check()` returns `subscribed=None` for a miss, meaning **unknown** — warn, and try the proxy
 anyway. Never turn a miss into a hard skip.
+
+**But a miss on an a-la-carte platform is a strong "no".** The same `subscribed=None` means
+something very different when the publisher's platform holds 3 titles in your table (Sage,
+T&F) than when it holds 1,500 (Wiley). `holdings.platform_count(pattern)` gives that number;
+`library_session.py` reads it through the `holdings_pub` key on tpl routes and, at ≤ 10
+titles, prints **疑無訂閱** before the first request and makes a single attempt — still an
+attempt, never a skip, but no re-login retry and no `--title` re-run when the publisher
+answers with its reader page (`reader_html`). `holdings.py platforms` lists the counts.

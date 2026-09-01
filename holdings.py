@@ -177,6 +177,27 @@ def check(doi):
                 issns=meta.get("issns"))
 
 
+def platform_count(pattern):
+    """Subscribed (is_free=0) journal count across every platform whose name contains
+    `pattern` (case-insensitive) — e.g. 'sage' → 3, 'wiley' → 1588. None if no table.
+
+    Why it matters: `check()` returning subscribed=None means "journal not in the table",
+    which is harmless on a database-level platform (Wiley, Springer: >300 titles listed)
+    and damning on an a-la-carte one (Sage: 3 titles, this isn't one of them). The caller
+    uses this to say "疑無訂閱" up front instead of retrying a reader page."""
+    if not DB.exists() or not pattern:
+        return None
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+    try:
+        row = con.execute("SELECT COUNT(*) FROM journals WHERE is_free=0 "
+                          "AND lower(publisher) LIKE ?", (f"%{pattern.lower()}%",)).fetchone()
+        return int(row[0]) if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
 def print_platforms():
     """List every platform you subscribe to, with journal counts. This is the authoritative
     answer to 'which publishers still need a route?' — the other half of that question is
