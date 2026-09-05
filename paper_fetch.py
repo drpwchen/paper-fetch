@@ -13,8 +13,10 @@
 
 Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用法錯誤 · 2=自動路線全敗
 JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
-                partial_path?, reject_reason?, oa_claimed?, verify?, verify_detail?,
-                volume_path?, extracted_pages?, elapsed_s}
+                partial_path?, reject_reason?, oa_claimed?, blocked_by?[], verify?,
+                verify_detail?, volume_path?, extracted_pages?, elapsed_s}
+`blocked_by` 列出被 bot 牆（js_challenge / recaptcha / cf_*）擋掉的候選 URL——有它就代表
+全文在牆後面，下一步是 layer 2 的真瀏覽器，不是「無全文」。
 「有效 PDF」＝ magic bytes ＋內容驗證（頁數/抽出字量；擋 in-press 的 1 頁 pre-proof 封面）；
 Elsevier TDM 另看 `X-ELS-Status` 回應 header——未授權的 DOI 會回 HTTP 200 ＋只有第一頁的 PDF。
 未過驗證的回應存 <out>.partial、reject_reason 進 envelope，階梯繼續往下走。
@@ -28,6 +30,9 @@ Elsevier TDM 另看 `X-ELS-Status` 回應 header——未授權的 DOI 會回 HT
     10.1016            → Elsevier TDM Article Retrieval API   (key: ELSEVIER_TDM_KEY)
     10.1002 / 10.1111  → Wiley TDM API                        (key: WILEY_TDM_TOKEN)
     10.1007 / 10.1186  → Springer/BMC OpenAccess（直連 content/pdf；API key 選用）
+                         ⚠ 2026-09 起 link.springer.com 對所有腳本請求回 JS「Client Challenge」
+                         （HTTP 200、3 KB HTML）；此路線只負責把它認出來，OA 全文改靠 PMC
+    10.3390            → MDPI：mdpi-res.com CDN 直連（www.mdpi.com 本站是 Cloudflare 403）
     其他 / 上述失敗    → Unpaywall 直連 OA PDF
     全部失敗           → 印機構 SFX 連結，機構登入手動下載
 
@@ -92,6 +97,30 @@ _LAST_REJECT = None  # (content, reason) of the most recent gate rejection → .
 _OA_CLAIMED = False  # Unpaywall said is_oa=true — if every route still fails, say so:
                      # "full text likely exists, routes are broken/in-press" is different
                      # follow-up from "paywalled" (issue #2, second observation)
+_BLOCKED = []        # (kind, url) of every candidate a bot wall answered instead of a PDF
+                     # (issue #3). "Blocked by a JS challenge" and "no OA copy" call for
+                     # different next steps — a headful browser passes the former.
+
+
+# Bot walls that answer a PDF URL with HTTP 200 + a small HTML page (issue #3). Each is a
+# JavaScript challenge: no header trick, cookie or TLS impersonation gets past it (curl_cffi
+# with a Chrome fingerprint gets the same stub from Springer) — only a real browser does.
+_CHALLENGE_MARKERS = (
+    (b"_fs-ch-", "js_challenge"),               # Springer Nature "Client Challenge" (2026-09)
+    (b"<title>client challenge", "js_challenge"),
+    (b"recaptcha", "recaptcha"),                # pmc.ncbi.nlm.nih.gov PDF path (two variants seen)
+    (b"just a moment", "cf_challenge"),         # Cloudflare
+    (b"attention required", "cf_block"),
+)
+
+
+def challenge_kind(content: bytes):
+    """Name the bot wall in an HTML response, or None when it is not one."""
+    head = content[:4000].lower()
+    for marker, kind in _CHALLENGE_MARKERS:
+        if marker in head:
+            return kind
+    return None
 
 
 def pdf_gate(content: bytes):
@@ -247,8 +276,66 @@ def route_springer(doi):
     else:
         print("⚠ 無 SPRINGER_API_KEY（OA 直連通常仍可）→ 需要時存：")
         print("   powershell -File ~/.secrets/secret.ps1 set SPRINGER_API_KEY")
-    # 直連 OA content/pdf
-    return _grab(f"https://link.springer.com/content/pdf/{doi}.pdf")
+    # 直連 OA content/pdf。2026-09-05 起 link.springer.com 對每個腳本請求（含舊 OA 文章、含
+    # 先抓落地頁拿 cookie、含 curl_cffi 模仿 Chrome）都回 HTTP 200 + 3 KB「Client Challenge」
+    # JS 頁；*.biomedcentral.com 的 /counter/pdf 也 302 回同一面牆。這裡只做一次，認出牆就
+    # 說清楚，剩下交給 PMC 候選（route_unpaywall）與 layer 2 的真瀏覽器。
+    pdf = _grab(f"https://link.springer.com/content/pdf/{doi}.pdf")
+    if pdf is None and _BLOCKED and _BLOCKED[-1][0] == "js_challenge":
+        print("  Springer: 直連被 JS Client Challenge 擋（不是 cookie gate、不是無 OA）→ "
+              "改靠 PMC 候選；都沒有時 layer 2 的 headful 瀏覽器可過此牆")
+    return pdf
+
+
+def _mdpi_cdn_urls(doi):
+    """10.3390 → mdpi-res.com CDN 上的 PDF 候選（issue #3）。
+
+    www.mdpi.com 本站對腳本一律 Cloudflare 403（含 Semantic Scholar 給的 /pdf 連結），但
+    文章 PDF 同時放在 CDN：
+      https://mdpi-res.com/d_attachment/{j}/{j}-{vol}-{art:05d}/article_deploy/{j}-{vol}-{art:05d}.pdf
+    `{j}` 有兩種：DOI 裡的期刊代碼（life、ijerph、jcm…）或期刊全名去空白（nutrients、
+    sensors、antioxidants…）——DOI 代碼 nu/s/antiox 的檔名用全名。2026-09-05 抽 17 個 DOI
+    兩種擇一命中 16 個。DOI 尾碼＝代碼＋卷＋兩位期號＋文章號；卷號長度從 Crossref 拿。"""
+    m = re.match(r"^10\.3390/([a-z]+)(\d+)$", doi.lower())
+    if not m:
+        return []
+    code, digits = m.group(1), m.group(2)
+    vol = title = None
+    try:
+        r = requests.get(f"https://api.crossref.org/works/{doi}", timeout=20,
+                         headers={"User-Agent": UA})
+        if r.status_code == 200:
+            msg = (r.json() or {}).get("message") or {}
+            vol = msg.get("volume")
+            title = (msg.get("container-title") or [None])[0]
+    except Exception as e:
+        print(f"  Crossref 查詢略過: {e}")
+    if vol and digits.startswith(vol) and len(digits) > len(vol) + 2:
+        art = digits[len(vol) + 2:]
+    else:  # Crossref 沒答：假設四位文章號、兩位期號
+        art, vol = digits[-4:], digits[:-6] or None
+    if not vol:
+        return []
+    art = art.zfill(5)
+    slugs = [code]
+    if title:
+        slug = re.sub(r"[^a-z0-9]", "", title.lower())
+        if slug and slug != code:
+            slugs.append(slug)
+    return [f"https://mdpi-res.com/d_attachment/{j}/{j}-{vol}-{art}/article_deploy/{j}-{vol}-{art}.pdf"
+            for j in slugs]
+
+
+def route_mdpi(doi):
+    urls = _mdpi_cdn_urls(doi)
+    if not urls:
+        print("  MDPI: DOI 不符 <代碼><卷><期><文章號> 型式 → 略過 CDN 直連")
+        return None
+    for u in urls:
+        pdf = _grab(u)
+        if pdf:
+            return pdf
+    return None
 
 
 def _pmc_render_url(url):
@@ -263,27 +350,47 @@ def _pmc_render_url(url):
     return None
 
 
-def _pmcid_render_url(doi):
-    """DOI→PMCID 直查（NCBI idconv）→ Europe PMC render 端點。
-
-    `_pmc_render_url` 只在候選 URL 字面帶 PMC 時觸發；NIH author manuscript 常在 PMC
-    但 Unpaywall 只給 landing page 或漏索引 → 這裡直接問 idconv 補一條候選。查無回 None。"""
+def _pmcid_lookup(doi):
+    """DOI→PMCID：NCBI idconv，查無或出錯再問 Europe PMC search（兩個獨立索引）。查無回 None。"""
     try:
         params = {"ids": doi, "format": "json", "tool": "paper_fetch"}
         if UNPAYWALL_EMAIL:
             params["email"] = UNPAYWALL_EMAIL
         r = requests.get("https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/",
                          params=params, timeout=20, headers={"User-Agent": UA})
-        if r.status_code != 200:
-            return None
-        for rec in (r.json() or {}).get("records", []):
-            pmcid = rec.get("pmcid")
-            if pmcid:
-                print(f"  idconv: {doi} → {pmcid}")
-                return f"https://europepmc.org/articles/{pmcid.upper()}?pdf=render"
+        if r.status_code == 200:
+            for rec in (r.json() or {}).get("records", []):
+                if rec.get("pmcid"):
+                    print(f"  idconv: {doi} → {rec['pmcid']}")
+                    return rec["pmcid"].upper()
     except Exception as e:
         print(f"  idconv 查詢略過: {e}")
+    try:
+        r = requests.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                         params={"query": f'DOI:"{doi}"', "format": "json",
+                                 "resultType": "lite"},
+                         timeout=20, headers={"User-Agent": UA})
+        if r.status_code == 200:
+            for rec in ((r.json() or {}).get("resultList") or {}).get("result") or []:
+                if rec.get("pmcid"):
+                    print(f"  Europe PMC search: {doi} → {rec['pmcid']}")
+                    return rec["pmcid"].upper()
+    except Exception as e:
+        print(f"  Europe PMC 查詢略過: {e}")
     return None
+
+
+def _pmcid_render_url(doi):
+    """DOI→PMCID → Europe PMC render 端點。
+
+    `_pmc_render_url` 只在候選 URL 字面帶 PMC 時觸發；NIH author manuscript 常在 PMC
+    但 Unpaywall 只給 landing page 或漏索引 → 這裡直接查 PMCID 補一條候選。查無回 None。
+
+    有 PMCID 時腳本能用的 PDF 端點只有 Europe PMC 這一個：pmc.ncbi.nlm.nih.gov 的 /pdf/
+    回 reCAPTCHA 頁，Europe PMC REST 的 fullTextXML 是 XML 不是 PDF（issue #3 查證）。
+    Europe PMC 偶爾回 HTTP 500 是暫時的（同一 URL 幾小時後 200），由 _grab 重試一次處理。"""
+    pmcid = _pmcid_lookup(doi)
+    return f"https://europepmc.org/articles/{pmcid}?pdf=render" if pmcid else None
 
 
 def _semantic_scholar_pdf(doi):
@@ -406,18 +513,37 @@ def route_unpaywall(doi):
     return None
 
 
+_RETRY_5XX_WAIT_S = 3
+
+
 def _grab(url, referer=None):
-    """通用 GET → 驗證 %PDF。用 browser UA。Cloudflare/reCAPTCHA 擋（HTML/403）回 None。"""
+    """通用 GET → 驗證 %PDF。用 browser UA。
+
+    5xx 重試一次（Europe PMC render 對同一 PMCID 先 500、稍後 200——issue #3）；HTTP 200
+    卻是 bot 牆的 HTML（Springer Client Challenge、reCAPTCHA、Cloudflare）認出來、記進
+    _BLOCKED 並印名字，讓「被牆擋」和「沒有 OA 副本」在 log 與 envelope 裡分得開。"""
     headers = {"User-Agent": BROWSER_UA, "Accept": "application/pdf,*/*"}
     if referer:
         headers["Referer"] = referer
-    try:
-        r = requests.get(url, timeout=90, headers=headers, allow_redirects=True)
-    except Exception as e:
-        print(f"  下載失敗 {url}: {e}")
-        return None
-    print(f"  GET {url} → HTTP {r.status_code} · {len(r.content)} bytes")
-    return r.content if r.status_code == 200 and valid_pdf(r.content) else None
+    r = None
+    for attempt in (1, 2):
+        try:
+            r = requests.get(url, timeout=90, headers=headers, allow_redirects=True)
+        except Exception as e:
+            print(f"  下載失敗 {url}: {e}")
+            return None
+        print(f"  GET {url} → HTTP {r.status_code} · {len(r.content)} bytes")
+        if r.status_code < 500 or attempt == 2:
+            break
+        print(f"  HTTP {r.status_code} 多半是暫時的 → {_RETRY_5XX_WAIT_S} s 後重試一次")
+        time.sleep(_RETRY_5XX_WAIT_S)
+    if r.status_code == 200 and valid_pdf(r.content):
+        return r.content
+    kind = challenge_kind(r.content) if r.content[:4] != b"%PDF" else None
+    if kind:
+        _BLOCKED.append((kind, url))
+        print(f"  ✗ 回應是 bot 牆（{kind}）而非 PDF —— 腳本過不了，真瀏覽器（layer 2 headful）可以")
+    return None
 
 
 def _grab_via_landing(url):
@@ -452,6 +578,8 @@ def routes_for(doi):
         primary = [route_wiley]
     elif d.startswith("10.1007") or d.startswith("10.1186"):
         primary = [route_springer]
+    elif d.startswith("10.3390"):
+        primary = [route_mdpi]
     else:
         primary = []
     return primary + [route_unpaywall]
@@ -538,6 +666,11 @@ def run_ladder(doi, out, title=None):
         if partial_path:
             print(f"  退件已留存（標題/作者 metadata 仍可用）→ {partial_path}")
         print("  多半是文章 in-press、出版社尚未釋出正式全文 → 走機構管道或過幾天重試。")
+    elif _BLOCKED:
+        kinds = sorted({k for k, _ in _BLOCKED})
+        print(f"\n✗ 候選 URL 有 {len(_BLOCKED)} 個被 bot 牆（{', '.join(kinds)}）擋下，其餘皆無效。")
+        print("  全文多半存在（牆後面就是 PDF）→ 用 layer 2 的真瀏覽器："
+              "library_session.py fetch <DOI> <out.pdf>；或稍後重試。這不是付費牆。")
     elif _OA_CLAIMED:
         print("\n✗ Unpaywall 標記 is_oa=true，但所有自動候選 URL 皆失效（in-press 常見）。")
         print("  全文多半存在 → 走機構 resolver 或稍後重試，而非付費牆。")
@@ -554,6 +687,7 @@ def run_ladder(doi, out, title=None):
             "bytes": 0, "sha256": None, "path": None, "resolver_url": resolver,
             "partial_path": partial_path, "reject_reason": reject_reason,
             "oa_claimed": _OA_CLAIMED,
+            "blocked_by": [{"kind": k, "url": u} for k, u in _BLOCKED],
             "elapsed_s": round(time.time() - started, 1)}
 
 

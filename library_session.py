@@ -1039,6 +1039,11 @@ def _tpl_verdict(status: str, sub, covered, suspect_unsub: bool, doi: str) -> st
               "的話多半是出版社對 proxy 節流或無訂閱（Sage 對無權限請求會拖到 timeout），"
               f"等幾分鐘或直接走 SFX。{_sfx_hint(doi)}", file=sys.stderr)
         return "fail"
+    if status == "js_challenge":
+        print("[fetch] 出版社回的是 JS bot 挑戰頁（Springer Client Challenge），不是閱讀器頁、"
+              "不是認證問題；重新登入無用。headless request.get 過不了，需要真正的頁面導航"
+              f"（headful nav）。{_sfx_hint(doi)}", file=sys.stderr)
+        return "fail"
     if status in ("cf_challenge", "cf_block", "rate_limited", "proxy_host_unregistered",
                   "redirect_loop", "request_error", "no_response", "unknown_prefix"):
         return "fail"     # _warn_if_blocked / _proxy_pdf already said what it is
@@ -1066,6 +1071,11 @@ def _classify(resp, body: bytes) -> str:
         return "cf_block"
     if resp.status == 429 or b"too many requests" in head or b"rate limit" in head:
         return "rate_limited"
+    # Springer Nature's "Client Challenge" (2026-09, issue #3): HTTP 200 + a 3 KB HTML page
+    # that loads /_fs-ch-*/script.js. A JS challenge, not a reader page and not auth — a
+    # request.get from a headful context still gets it; only a real page.goto passes.
+    if b"_fs-ch-" in head or b"<title>client challenge" in head:
+        return "js_challenge"
     if "/login" in (resp.url or ""):
         return "auth_expired"
     # The library's proxy has no registration for this publisher's subdomain → report it
@@ -1544,7 +1554,7 @@ def _citation_meta_pdf(page, doi: str, out: Path, nav: bool = False,
             print(f"[meta] resolver went straight to the PDF -> {out} ({len(body)} bytes)",
                   file=sys.stderr)
             return "pdf"
-        if st in ("cf_challenge", "cf_block", "rate_limited") or (
+        if st in ("cf_challenge", "cf_block", "rate_limited", "js_challenge") or (
                 r is not None and r.status >= 400):
             _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "meta",
                   "status": st, "step": "doi_resolve", "nav": nav,

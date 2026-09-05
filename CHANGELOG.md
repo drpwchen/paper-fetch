@@ -5,6 +5,54 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] — 2026-09-05
+
+Issue #3: two open-access papers, both `is_oa=true` at Unpaywall, both ended in「所有候選皆未取得
+有效 PDF」. Reproducing them showed three different things hiding behind that one line, none of
+which was "no OA copy":
+
+- **MDPI** (`10.3390/life15091404`): the publisher site is Cloudflare-403 to scripts, and the
+  Europe PMC render endpoint happened to answer HTTP 500 that minute (the same URL served the
+  5.8 MB PDF a few hours later). The article had been on MDPI's own CDN the whole time.
+- **Springer/BMC** (`10.1186/s12984-026-02088-2`): `link.springer.com/content/pdf/…` now answers
+  *every* scripted request — old OA articles, requests carrying the landing page's cookies,
+  even a Chrome TLS fingerprint via curl_cffi — with HTTP 200 and a 3 KB "Client Challenge" JS
+  page. Not a cookie gate: a JavaScript bot wall. The article is not in PMC yet (PMID only), so
+  there was genuinely no scripted route — but the log said "no valid PDF" instead of "blocked".
+- The smoke-test DOI in AGENTS.md (`10.1186/s12984-023-01168-x`) was hitting the same wall and
+  only succeeded because it *is* in PMC.
+
+### Added
+- **`route_mdpi` for `10.3390`.** Builds the `mdpi-res.com/d_attachment/…/article_deploy/…pdf`
+  CDN URL from the DOI (journal code + volume + 2-digit issue + article number; volume length
+  from Crossref) and tries it with the DOI's journal code and with the journal's full name
+  (`nu` → `nutrients`, `s` → `sensors`, `antiox` → `antioxidants` — MDPI names files either
+  way). 16 of 17 sampled DOIs across 14 journals resolved on the first or second URL.
+- **`blocked_by` in the envelope, `js_challenge` / `recaptcha` / `cf_*` in the log.** `_grab`
+  now recognises the bot walls that answer a PDF URL with HTTP 200 + HTML (Springer's Client
+  Challenge, PMC's reCAPTCHA page, Cloudflare) and names them; the final verdict says "N
+  candidates behind a bot wall → layer 2's real browser" instead of "paywall or Cloudflare".
+  An orchestrator can tell "blocked" from "absent" without parsing stderr.
+- **Europe PMC search as the second DOI→PMCID source** (`_pmcid_lookup`), after NCBI idconv.
+
+### Changed
+- **`_grab` retries an HTTP 5xx once** after 3 s. Europe PMC's render endpoint is the only
+  script-usable PDF endpoint for a PMCID (`pmc.ncbi.nlm.nih.gov/…/pdf/` is reCAPTCHA-gated,
+  the REST `fullTextXML` is XML), so a transient 500 there used to be terminal.
+- **`route_springer`** makes one request and, when the answer is the challenge page, says so
+  and hands over to the PMC candidates instead of implying the article has no OA copy.
+- **`library_session._classify`** returns `js_challenge` for the same stub, so the proxy layer
+  no longer reads it as `reader_html` ("多半是無訂閱") and does not re-login for it.
+
+### Notes
+- Issue #3's suggestion 3 (run idconv regardless of which route ran first) was already the
+  behaviour — `route_unpaywall` always queries idconv. Case 2 simply is not in PMC.
+- For a Springer/BMC OA article that is not (yet) in PMC there is now no *layer-1* route;
+  layer 3 still works. Verified 2026-09-05 through the institutional proxy: the Client
+  Challenge does **not** appear there (headless `request.get`, no headful nav needed). The
+  canonical `content/pdf` URL answered 404 and the `_reference.pdf` alt path served a 16-page
+  *Article in Press* manuscript — which is also why the article is not in PMC yet.
+
 ## [1.5.3] — 2026-09-01
 
 A batch run from another project asked for a Sage article (*J Appl Gerontol* 2022, 10.1177) the

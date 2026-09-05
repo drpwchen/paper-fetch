@@ -100,7 +100,8 @@ Try in order; each route falls through to the next, ending at the SFX institutio
 | OA (any) | — | Zotero **Find Available PDF** or **Zotadata** right-click → attaches in place ✅ |
 | 10.1016 | Elsevier / ScienceDirect | `paper_fetch.py` → Elsevier TDM (`ELSEVIER_TDM_KEY`); when TDM serves only an in-press cover, **or only the first page because the key is not entitled** (`X-ELS-Status: WARNING … not entitled`, HTTP 200 — v1.5.1), falls through to the ClinicalKey `ck` route (headful window, organization modal auto-answered — v1.4.0). `library_session.py fetch … --skip-layer1` forces `ck` directly |
 | 10.1002 / 10.1111 | **Wiley** | `paper_fetch.py` → Wiley TDM (`WILEY_TDM_TOKEN`) |
-| 10.1007 / 10.1186 | Springer / BMC | `paper_fetch.py` → OA content/pdf (Springer API key optional) |
+| 10.1007 / 10.1186 | Springer / BMC | `paper_fetch.py` → OA content/pdf (Springer API key optional). **Since 2026-09 link.springer.com answers every scripted request with a JS "Client Challenge"** (HTTP 200, 3 KB HTML — logged as `js_challenge`, listed in the envelope's `blocked_by`); OA copies then come from PMC / Europe PMC, everything else needs layer 2's real browser |
+| 10.3390 | MDPI | `paper_fetch.py` → `mdpi-res.com` CDN direct (www.mdpi.com is Cloudflare-403 to scripts; the CDN is not) |
 | anything left | — | `paper_fetch.py` → Unpaywall direct |
 | paywalled (Wiley/LWW/Sage/NEJM…) | institutional | `library_session.py fetch` — **fully automatic** off-campus (see below) |
 

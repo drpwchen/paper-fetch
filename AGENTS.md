@@ -27,6 +27,8 @@ reading end is `claude-paper-tools`, the discovery end is `paper-radar`.
    python paper_fetch.py 10.1186/s12984-023-01168-x out.pdf   # a real OA article; must yield a PDF
    ```
    If that fails, the problem is config or network, not the library. Fix it here, not later.
+   (Expected log since 2026-09: the Springer direct link comes back `js_challenge` — that is
+   the publisher's bot wall, not your config — and the PDF arrives from Europe PMC.)
 5. Only then the proxy layer. As of v1.0 all route code (including the full LWW/Ovid flow)
    ships working — what remains is authentication config: set `auth.family: form` and point
    the selectors in `config.yaml` at the gate's login form (inspect it in devtools; EZproxy

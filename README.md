@@ -40,9 +40,14 @@ The whole design is: **try the cheapest, most-permitted route first, fall throug
 ```
 DOI
  ├─ 1. Open Access ─────── Unpaywall + Semantic Scholar openAccessPdf → every oa_location,
- │                          PMC→Europe PMC render, landing-page citation_pdf_url (repositories)
+ │                          PMC→Europe PMC render (PMCID via NCBI idconv, then Europe PMC search),
+ │                          landing-page citation_pdf_url (repositories), MDPI's mdpi-res.com CDN
+ │                          (the publisher site itself is Cloudflare-403 to scripts)
  ├─ 2. Publisher TDM API ─ Elsevier / Wiley / Springer official text-mining endpoints
  │                          (you register for your own key; entirely sanctioned)
+ │                          ⚠ Springer's direct content/pdf answers scripts with a JS "Client
+ │                          Challenge" since 2026-09 — named as such (`blocked_by` in the
+ │                          envelope), OA copies come from PMC, the rest from layer 3's browser
  ├─ 3. Institutional proxy your library's off-campus remote-auth + EZproxy/NetScaler proxy
  │                          (your own login; for subscriptions you already have)
  └─ 4. Resolver link ────── print your library's SFX/OpenURL link → finish manually
