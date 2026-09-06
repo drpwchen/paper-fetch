@@ -75,6 +75,13 @@ CLI:
                                                        # something the gate let through but
                                                        # a human can see is not the article
                                                        # (env: PAPERFETCH_SKIP_LAYER1=1)
+    python library_session.py fetch <DOI> <out.pdf> --direct
+                                                       # force the direct route: a real
+                                                       # browser straight to the publisher,
+                                                       # no proxy, no login. Runs on its own
+                                                       # whenever layer 1 reports the article
+                                                       # free (PubMed) or walled off (bot wall)
+                                                       # (env: PAPERFETCH_DIRECT=1)
     python library_session.py stats                    # access-log summary / block analysis
     python library_session.py routes                   # per-route scorecard + holdings gaps
 
@@ -125,7 +132,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from paper_config import CFG, require
 
@@ -1120,29 +1127,205 @@ def _classify_exc(e: Exception) -> str:
     return "request_error"
 
 
+_L1_ENV: dict = {}   # layer 1's --json envelope for the current fetch. Two fields steer layer 2:
+                     # `free_at_publisher` (PubMed's free-full-text flag) and `blocked_by`
+                     # (candidates a bot wall answered) — either one means "the PDF is on the
+                     # publisher's site, a script just can't reach it" → the direct route.
+
+
 def _try_paper_fetch(doi: str, out: Path, title: str | None = None) -> bool:
-    """Layer 1: API/OA/TDM (Elsevier TDM, Springer OA, Unpaywall) — no proxy, no CF."""
+    """Layer 1: API/OA/TDM (Elsevier TDM, Springer OA, Unpaywall, PubMed-free) — no proxy, no CF."""
+    global _L1_ENV
+    _L1_ENV = {}
     if not PAPER_FETCH.exists():
         return False
-    cmd = [sys.executable, str(PAPER_FETCH)]
+    cmd = [sys.executable, str(PAPER_FETCH), "--json"]
     if title:                      # → content verification + volume extraction downstream
         cmd += ["--title", title]
     cmd += [doi, str(out)]
     try:
-        r = subprocess.run(cmd, timeout=120, capture_output=True, text=True,
+        r = subprocess.run(cmd, timeout=150, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
     except Exception:
         return False
+    try:                           # --json contract: stdout is exactly one envelope line
+        _L1_ENV = json.loads([ln for ln in (r.stdout or "").splitlines() if ln.strip()][-1])
+    except Exception:
+        _L1_ENV = {}
     ok = _is_pdf(out)
     if ok:
-        _log({"kind": "api", "doi": doi, "status": "pdf", "bytes": out.stat().st_size})
+        _log({"kind": "api", "doi": doi, "status": "pdf", "bytes": out.stat().st_size,
+              "route": _L1_ENV.get("route")})
     else:
         # Surface WHY the OA/TDM ladder came back empty — swallowing it hides route
         # diagnostics (which OA candidates were tried, missing-token hints, resolver link).
-        tail = [ln for ln in (r.stdout or "").splitlines() if ln.strip()][-6:]
+        tail = [ln for ln in (r.stderr or "").splitlines() if ln.strip()][-6:]
         for ln in tail:
             print(f"[paper_fetch] {ln}", file=sys.stderr)
     return ok
+
+
+# --- direct route: a real browser straight to the publisher (no proxy, no login) ----------
+# Why this exists (2026-09-06): two PubMed "free full text" articles — Annals GRADE Guidance 42
+# (10.7326, Atypon) and Minerva EJPRM 2019 (10.23736) — came back exit 6 (no proxy route) after
+# layer 1 logged Unpaywall `closed` and a Cloudflare 403 on the landing page. Nothing in the
+# ladder ever opened the publisher's page in a browser WITHOUT the institutional proxy, so a
+# free article behind a bot wall was unreachable unless its prefix happened to have a proxy
+# route. This route is that missing step; it needs no library at all.
+#
+# Mechanics that matter (all verified against those two sites):
+#   · `page.goto` headful clears Cloudflare's managed challenge by itself in ~10 s; the
+#     challenge page is LOCALISED ("請稍候..." here, "Just a moment..." elsewhere) — match
+#     the markers below, not one English title.
+#   · The PDF must be fetched from INSIDE the page (`page.evaluate` + fetch()): that goes
+#     through the browser's own network stack with its TLS fingerprint, cookies and Referer.
+#     `page.request.get` from the same context is a Node-side request and gets 403 from the
+#     same URL a page-fetch downloads fine.
+#   · Some publishers put a "your download will start shortly" page between the link and
+#     the file, with a one-shot token URL inside (Minerva `freedownload.php` →
+#     `getfreepdf/<token>/<id>.pdf`) — hence the second hop.
+#   · A publisher can refuse the PDF endpoint while serving the full-text HTML freely
+#     (Annals: /doi/pdf → HTTP 403 with the article page as the body, for a real person
+#     in their own Chrome too). That is logged `publisher_refused`, distinct from a bot wall.
+DIRECT_CHALLENGE_WAIT_S = int(os.environ.get("PAPERFETCH_DIRECT_CF_WAIT_S", "60"))
+DIRECT_DOWNLOAD_WAIT_MS = 20000
+_CHALLENGE_MARKERS = ("just a moment", "請稍候", "cf_chl_opt", "verify you are human",
+                      "attention required", "<title>client challenge")
+_DIRECT_LINK = re.compile(r"pdf|download|fulltext|getfree", re.I)
+_JS_PAGE_FETCH = """async (u) => {
+  const r = await fetch(u, {credentials: 'include'});
+  const buf = new Uint8Array(await r.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 0x8000)
+    bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+  return {status: r.status, ctype: r.headers.get('content-type') || '', url: r.url, b64: btoa(bin)};
+}"""
+
+
+def _challenged(page) -> bool:
+    if "__cf_chl_rt_tk" in page.url:
+        return True
+    low = page.content()[:200_000].lower()
+    return any(m in low for m in _CHALLENGE_MARKERS)
+
+
+def _direct_candidates(html: str, base: str) -> list[str]:
+    """PDF-looking links on a page: `citation_pdf_url` first, then hrefs that say pdf /
+    download / fulltext / getfree — minus supplements, which are PDFs of the wrong thing."""
+    m = re.search(r'citation_pdf_url"\s+content="([^"]+)"', html)
+    hrefs = re.findall(r'href="([^"]+)"', html, re.I)
+    raw = ([m.group(1)] if m else []) + [
+        h for h in hrefs if _DIRECT_LINK.search(h) and "suppl" not in h.lower()]
+    out: list[str] = []
+    for h in raw:
+        u = urljoin(base, _html.unescape(h))
+        if u.startswith("http") and u not in out:
+            out.append(u)
+    return out
+
+
+def _page_fetch(page, url: str):
+    res = page.evaluate(_JS_PAGE_FETCH, url)
+    return res["status"], (res.get("ctype") or "").lower(), res["url"], base64.b64decode(res["b64"])
+
+
+def _direct_pdf(page, doi: str, out: Path) -> str:
+    """doi.org → publisher page in a real (headful) browser → PDF via in-page fetch.
+    Returns "pdf" | "fail". Never touches the proxy, never needs a login."""
+    prefix = doi.split("/")[0]
+
+    def log(status: str, **kw) -> None:
+        _log({"kind": "direct", "doi": doi, "prefix": prefix, "status": status, **kw})
+
+    _throttle()
+    try:
+        page.goto(f"https://doi.org/{doi}", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception as e:
+        log(_classify_exc(e), step="landing", note=repr(e)[:100])
+        print(f"[direct] landing failed: {_classify_exc(e)}", file=sys.stderr)
+        return "fail"
+    deadline = time.time() + DIRECT_CHALLENGE_WAIT_S
+    waited = False
+    while _challenged(page):
+        if time.time() > deadline:
+            log("cf_challenge", step="landing", url=page.url[:120])
+            _warn_if_blocked("cf_challenge")
+            print(f"[direct] bot challenge did not clear in {DIRECT_CHALLENGE_WAIT_S}s "
+                  f"({page.title()[:40]!r}) — retry later, this is the wall, not the paper",
+                  file=sys.stderr)
+            return "fail"
+        waited = True
+        time.sleep(2)
+    if waited:
+        print("[direct] bot challenge cleared", file=sys.stderr)
+        time.sleep(1.5)           # let the real page's scripts set their cookies
+    landing = page.url
+    html = page.content()
+    cands = _direct_candidates(html, landing)
+    if not cands:
+        log("no_pdf_link", step="landing", url=landing[:120], bytes=len(html))
+        print(f"[direct] no PDF-looking link on {landing[:100]}", file=sys.stderr)
+        return "fail"
+    print(f"[direct] {landing[:90]} → {len(cands)} candidate link(s)", file=sys.stderr)
+
+    def take(body: bytes, url: str, **kw) -> bool:
+        if body[:4] != b"%PDF" or len(body) <= 2048:
+            return False
+        out.write_bytes(body)
+        log("pdf", url=url[:120], bytes=len(body), **kw)
+        print(f"[direct] OK -> {out} ({len(body)} bytes)", file=sys.stderr)
+        return True
+
+    refused = None
+    for u in cands[:6]:
+        try:
+            st, ct, final, body = _page_fetch(page, u)
+        except Exception as e:
+            log("request_error", step="pdf", url=u[:120], note=repr(e)[:100])
+            continue
+        print(f"[direct]   {u[:90]} → HTTP {st} {ct.split(';')[0] or '-'} {len(body)}B",
+              file=sys.stderr)
+        if take(body, u):
+            return "pdf"
+        if st == 200 and "html" in ct:
+            # An interstitial download page: look one hop deeper for the actual file.
+            inner = [v for v in _direct_candidates(body.decode("utf-8", "ignore"), final)
+                     if v.lower().endswith(".pdf") or "getfreepdf" in v.lower()]
+            for v in inner[:3]:
+                try:
+                    st2, ct2, _, body2 = _page_fetch(page, v)
+                except Exception:
+                    continue
+                print(f"[direct]     ↳ {v[:86]} → HTTP {st2} {ct2.split(';')[0] or '-'} "
+                      f"{len(body2)}B", file=sys.stderr)
+                if take(body2, v, hop=2):
+                    return "pdf"
+        elif st in (401, 403) and refused is None:
+            refused = (st, u)
+    # Last resort: a real navigation — publishers that answer the link with
+    # Content-Disposition: attachment hand the browser a download instead of a body.
+    try:
+        with page.expect_download(timeout=DIRECT_DOWNLOAD_WAIT_MS) as dl:
+            with contextlib.suppress(Exception):     # goto raises when a download starts
+                page.goto(cands[0], wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        dl.value.save_as(out)
+        if _is_pdf(out):
+            log("pdf", url=cands[0][:120], bytes=out.stat().st_size, via="download")
+            print(f"[direct] OK (browser download) -> {out}", file=sys.stderr)
+            return "pdf"
+    except Exception:
+        pass
+    if refused:
+        log("publisher_refused", http=refused[0], url=refused[1][:120], landing=landing[:120])
+        print(f"[direct] the article page renders (no bot wall) but the PDF endpoint answers "
+              f"HTTP {refused[0]} with HTML — the publisher is refusing PDF downloads from this "
+              f"network/session right now (a person in their own browser gets the same). The "
+              f"full text is readable on the page; the PDF is not a route bug and not a paywall.",
+              file=sys.stderr)
+    else:
+        log("no_pdf", url=landing[:120])
+        print("[direct] none of the candidate links produced a PDF", file=sys.stderr)
+    return "fail"
 
 
 def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> str:
@@ -2021,13 +2204,16 @@ def _content_check(out: Path, title: str | None) -> None:
 
 
 def run_fetch(pw, doi: str, out: Path, title: str | None = None,
-              skip_layer1: bool = False) -> str:
-    """Three-layer ladder: ① paper_fetch's API/OA/TDM (no proxy) → ② holdings entitlement
-    pre-check → ③ dispatch the proxy route by ROUTES[prefix]["kind"] (tpl / meta / lww).
+              skip_layer1: bool = False, force_direct: bool = False) -> str:
+    """Ladder: ① paper_fetch's API/OA/TDM (no proxy) → ①½ the direct route (a real browser
+    straight to the publisher, no proxy/login) when ① reports the article is free but a
+    script was walled off → ② holdings entitlement pre-check → ③ dispatch the proxy route
+    by ROUTES[prefix]["kind"] (tpl / meta / lww / ck).
 
     `skip_layer1` is the human override for ①: the content gate is heuristic, and when it
     lets a non-article through (a 1-page TDM preview did exactly that on 2026-08-31) the
     only way to reach the proxy route was to edit the code. Now it's a flag.
+    `force_direct` runs ①½ regardless of what ① said (`--direct`).
 
     ==Returns a REASON, not a bool==: "ok" | "auth" (session/login problem) | "no_route"
     (no route for this publisher) | "fail" (a route ran and came back empty). main() maps
@@ -2045,21 +2231,42 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
     prefix = doi.split("/")[0]
     route = ROUTES.get(prefix, {})
     kind = route.get("kind")
-    needs_headful = kind in ("lww", "ck") or (kind == "meta" and route.get("nav"))
+    # Layer 1 — API/OA/TDM (no proxy, no CF, no login). Works out of the box. It runs
+    # before the browser exists: it needs none, and its envelope decides whether the
+    # direct route (headful) is worth opening one for.
+    if skip_layer1:
+        print("[fetch] --skip-layer1 → OA/TDM layer skipped, going to the proxy route",
+              file=sys.stderr)
+        _log({"kind": "api", "doi": doi, "status": "skipped"})
+    elif _try_paper_fetch(doi, out, title):
+        print(f"[fetch] got via API/OA/TDM route -> {out}", file=sys.stderr)
+        return "ok"
+    direct_why = []
+    if _L1_ENV.get("free_at_publisher"):
+        direct_why.append("PubMed flags it free full text")
+    if _L1_ENV.get("blocked_by"):
+        kinds = sorted({b.get("kind") for b in _L1_ENV["blocked_by"]})
+        direct_why.append(f"a bot wall ({', '.join(kinds)}) answered the script")
+    if force_direct:
+        direct_why.append("--direct")
+    needs_headful = (kind in ("lww", "ck") or (kind == "meta" and route.get("nav"))
+                     or bool(direct_why))
     ctx = _new_context(pw, headless=not needs_headful)
     _mark("restore_session")
     restore_session(ctx)
     page = ctx.new_page()
     _mark("new_page OK")
     try:
-        # Layer 1 — API/OA/TDM (no proxy, no CF, no login). Works out of the box.
-        if skip_layer1:
-            print("[fetch] --skip-layer1 → OA/TDM layer skipped, going to the proxy route",
-                  file=sys.stderr)
-            _log({"kind": "api", "doi": doi, "status": "skipped"})
-        elif _try_paper_fetch(doi, out, title):
-            print(f"[fetch] got via API/OA/TDM route -> {out}", file=sys.stderr)
-            return "ok"
+        # Layer 1½ — the direct route: the article is on the publisher's site for free, a
+        # script just cannot get past the wall. A real browser can, and it needs no library.
+        if direct_why:
+            print(f"[direct] {'; '.join(direct_why)} → real browser straight to the publisher "
+                  f"(no proxy, no login)", file=sys.stderr)
+            if _direct_pdf(page, doi, out) == "pdf":
+                _content_check(out, title)
+                _drop_stale_partial(out)
+                return "ok"
+            print("[direct] no PDF that way → institutional route next", file=sys.stderr)
         if not ensure_login(page):
             print("[fetch] LOGIN FAILED — this is an authentication problem, NOT evidence "
                   "that the paper has no route. Run `library_session.py login` (it opens a "
@@ -2270,6 +2477,7 @@ def main(argv):
     # we got actually this article, or the whole supplement it sits in? See _content_check.
     title = None
     skip_layer1 = os.environ.get("PAPERFETCH_SKIP_LAYER1") == "1"
+    force_direct = os.environ.get("PAPERFETCH_DIRECT") == "1"
     rest = []
     i = 0
     while i < len(argv):
@@ -2281,6 +2489,8 @@ def main(argv):
             title = a.split("=", 1)[1]
         elif a == "--skip-layer1":
             skip_layer1 = True
+        elif a == "--direct":
+            force_direct = True
         else:
             rest.append(a)
         i += 1
@@ -2300,7 +2510,7 @@ def main(argv):
         print(f"unknown command: {cmd}")
         return 1
     if cmd == "fetch" and len(argv) < 3:
-        print('usage: fetch <DOI> <out.pdf> [--title "<article title>"] [--skip-layer1]')
+        print('usage: fetch <DOI> <out.pdf> [--title "<article title>"] [--skip-layer1] [--direct]')
         return 1
 
     from patchright.sync_api import sync_playwright   # stealth fork — passes Cloudflare
@@ -2320,7 +2530,8 @@ def main(argv):
                     # 0 ok · 2 route ran but came back empty · 3 auth · 6 no route
                     return {"ok": 0, "fail": 2, "auth": 3,
                             "no_route": 6}[run_fetch(pw, argv[1], Path(argv[2]), title,
-                                                     skip_layer1=skip_layer1)]
+                                                     skip_layer1=skip_layer1,
+                                                     force_direct=force_direct)]
 
                 # `login` needs a real window: the proxy's JS-redirect interstitial
                 # never completes headless. `check` only hits the gate's login page → headless.

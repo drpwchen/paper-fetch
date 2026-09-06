@@ -5,6 +5,55 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] — 2026-09-06
+
+Two PubMed "free full text" articles came back as unobtainable: *Annals* GRADE Guidance 42
+(`10.7326/ANNALS-24-02013`, Atypon) and Chen 2019 in *Eur J Phys Rehabil Med*
+(`10.23736/S1973-9087.19.05545-X`, Minerva Medica). Reproducing them showed a hole in the
+ladder rather than a wall too high: Unpaywall lists both as `closed`, the publisher pages are
+Cloudflare-403 to scripts, neither is in PMC, and neither DOI prefix has an institutional-proxy
+route — so layer 1 said "no OA copy" and layer 3 said `no_route` (exit 6). Nothing ever opened
+the publisher's page in a browser *without* the proxy, which is all a free article needs.
+
+### Added
+- **PubMed's free-full-text flag as an OA signal** (`route_pubmed_free`, last rung of layer 1).
+  One esearch (`"<doi>"[doi] AND free full text[sb]`) says whether PubMed knows the article is
+  free; it is an index independent of Unpaywall and it knows about publisher-side free articles
+  that carry no CC licence. When set, layer 1 tries the publisher landing page directly
+  (publishers without a bot wall are done here); a walled landing page is recorded in
+  `blocked_by` instead of being read as "no OA copy". Envelope: `free_at_publisher`.
+- **The direct route** (`library_session._direct_pdf`, layer 1½): when layer 1 reports
+  `free_at_publisher` or `blocked_by` — or `fetch … --direct` / `PAPERFETCH_DIRECT=1` — a real
+  headful browser goes to `doi.org/<DOI>` with **no proxy and no login**, waits out the
+  Cloudflare managed challenge (its page is localised — "請稍候…" here — so the markers, not an
+  English title, are matched), collects `citation_pdf_url` and PDF-looking links, fetches them
+  **from inside the page** (`fetch()` in the page's own network stack; `page.request.get`
+  from the same context gets a 403 for the very same URL), follows one interstitial hop
+  ("your download will start shortly" → one-shot token URL, as Minerva does), and falls back
+  to a real navigation for publishers that answer with `Content-Disposition: attachment`.
+  Logged as `kind: direct`; needs no library configuration at all.
+- `publisher_refused` as a distinct outcome: the article page renders (no wall) but the PDF
+  endpoint answers HTTP 403 with HTML. *Annals* does exactly this today — for a person in
+  their own Chrome too, while `/doi/full-xml/` serves the JATS full text freely — so the log
+  says "the publisher is refusing PDFs from this network right now", not "route bug" or
+  "paywall".
+
+### Changed
+- `run_fetch` runs layer 1 **before** launching the browser (it never needed one) and lets
+  layer 1's envelope decide headless vs headful. `_try_paper_fetch` now calls `paper_fetch.py
+  --json` and keeps the envelope in `_L1_ENV`.
+
+### Verified
+- `10.23736/S1973-9087.19.05545-X`: layer 1 `blocked_by` (Cloudflare on the landing page)
+  → direct route → challenge cleared → `freedownload.php` → `getfreepdf/<token>/….pdf`,
+  378 KB, title verified. Exit 0.
+- `10.7326/ANNALS-24-02013`: direct route clears Cloudflare, finds `/doi/pdf/…?download=true`,
+  gets HTTP 403 HTML from it (and from `/doi/epdf/`, `/doi/reader/`) — logged
+  `publisher_refused`. Same result from the user's own Chrome, so not a fingerprint issue.
+- Note for the next reader: the Minerva URL the other agent had (`cod=R33Y2019N06A0754`) is
+  not the DOI suffix — the DOI is `…19.05545-X`, from PubMed 30868834. Guessing a Minerva DOI
+  from the article code gives a DOI that does not exist (Unpaywall 404).
+
 ## [1.5.4] — 2026-09-05
 
 Issue #3: two open-access papers, both `is_oa=true` at Unpaywall, both ended in「所有候選皆未取得

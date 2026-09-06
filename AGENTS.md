@@ -76,6 +76,14 @@ And check the *name* of the failure before you trust it: that 403 was logged as 
 (a 403 page has no `citation_pdf_url` in it either), which is the same wall wearing a different
 label. Resolver responses are now classified before the meta tag is looked for.
 
+Fifth (2026-09-06): **"PubMed says free, Unpaywall says closed, publisher is Cloudflare-403,
+prefix has no proxy route" is the direct route's job, not a dead end.** `library_session.py
+fetch` runs it on its own when layer 1 reports `free_at_publisher` or `blocked_by`; `--direct`
+forces it. It opens the publisher page in a real browser with NO proxy and fetches the PDF
+from inside the page. If it logs `publisher_refused`, the publisher is declining PDFs for this
+network while serving the HTML — a person in their own browser gets the same — so do not
+"fix" the route; wait, or read the HTML.
+
 Fourth: **"no `citation_pdf_url`" is not "no route".** Some entitled articles simply don't carry
 the tag (Nature news/comment items). A `meta` route can take `pdf_from_landing: "{landing}.pdf"`
 to derive the PDF URL from the article URL instead of giving up.

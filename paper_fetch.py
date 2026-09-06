@@ -13,10 +13,12 @@
 
 Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用法錯誤 · 2=自動路線全敗
 JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
-                partial_path?, reject_reason?, oa_claimed?, blocked_by?[], verify?,
-                verify_detail?, volume_path?, extracted_pages?, elapsed_s}
+                partial_path?, reject_reason?, oa_claimed?, free_at_publisher?, blocked_by?[],
+                verify?, verify_detail?, volume_path?, extracted_pages?, elapsed_s}
 `blocked_by` 列出被 bot 牆（js_challenge / recaptcha / cf_*）擋掉的候選 URL——有它就代表
-全文在牆後面，下一步是 layer 2 的真瀏覽器，不是「無全文」。
+全文在牆後面，下一步是 layer 2 的真瀏覽器，不是「無全文」。`free_at_publisher` 是 PubMed
+的 free full text 旗標（Unpaywall 對「出版社自己免費開放」的文章常記 closed）；它和
+`blocked_by` 任一成立，library_session 就走 direct 路線（真瀏覽器直連出版社，不經 proxy）。
 「有效 PDF」＝ magic bytes ＋內容驗證（頁數/抽出字量；擋 in-press 的 1 頁 pre-proof 封面）；
 Elsevier TDM 另看 `X-ELS-Status` 回應 header——未授權的 DOI 會回 HTTP 200 ＋只有第一頁的 PDF。
 未過驗證的回應存 <out>.partial、reject_reason 進 envelope，階梯繼續往下走。
@@ -34,6 +36,7 @@ Elsevier TDM 另看 `X-ELS-Status` 回應 header——未授權的 DOI 會回 HT
                          （HTTP 200、3 KB HTML）；此路線只負責把它認出來，OA 全文改靠 PMC
     10.3390            → MDPI：mdpi-res.com CDN 直連（www.mdpi.com 本站是 Cloudflare 403）
     其他 / 上述失敗    → Unpaywall 直連 OA PDF
+    仍失敗             → PubMed free full text 旗標 → 出版社落地頁（沒 bot 牆的出版社這裡就拿到）
     全部失敗           → 印機構 SFX 連結，機構登入手動下載
 
 KEY 安全：所有 token 從 PC DPAPI secret store 讀（secret.ps1 get），只放記憶體、塞 header，
@@ -100,6 +103,10 @@ _OA_CLAIMED = False  # Unpaywall said is_oa=true — if every route still fails,
 _BLOCKED = []        # (kind, url) of every candidate a bot wall answered instead of a PDF
                      # (issue #3). "Blocked by a JS challenge" and "no OA copy" call for
                      # different next steps — a headful browser passes the former.
+_FREE_AT_PUBLISHER = None   # PubMed's `free full text[sb]` verdict for this DOI (None = not asked
+                            # / unknown). Unpaywall says `closed` for plenty of articles the
+                            # publisher gives away (Annals GRADE guidance, Minerva EJPRM — both
+                            # 2026-09-06); PubMed's flag is the index that knows.
 
 
 # Bot walls that answer a PDF URL with HTTP 200 + a small HTML page (issue #3). Each is a
@@ -557,6 +564,14 @@ def _grab_via_landing(url):
     if r.status_code == 200 and valid_pdf(r.content):
         print(f"  落地頁本身即 PDF: {url} · {len(r.content)} bytes")
         return r.content
+    kind = challenge_kind(r.content) if r.content[:4] != b"%PDF" else None
+    if kind or r.status_code in (403, 429, 503):
+        # A bot wall in front of the landing page (Cloudflare "Just a moment", Atypon 403):
+        # not a verdict about the article — the same URL renders in a real browser.
+        _BLOCKED.append((kind or f"http_{r.status_code}", r.url))
+        print(f"  ✗ 落地頁 {r.url} → HTTP {r.status_code}"
+              f"（{kind or 'bot 牆／拒答'}）—— 腳本過不了，真瀏覽器（layer 2 direct）可以")
+        return None
     if "html" not in r.headers.get("content-type", "").lower():
         return None
     m = re.search(r'citation_pdf_url"\s+content="([^"]+)"', r.text)
@@ -569,8 +584,50 @@ def _grab_via_landing(url):
     return _grab(pdf_url, referer=r.url)
 
 
+def pubmed_free_full_text(doi):
+    """PubMed 的「free full text」旗標：True／False／None（查不到或出錯）。
+
+    一個 esearch 就夠：`"<doi>"[doi] AND free full text[sb]` 有命中＝PubMed 知道出版社（或
+    PMC）免費給全文。它和 Unpaywall 是兩個獨立索引，而且對「出版社自己免費開放、沒掛 CC
+    授權」的文章，Unpaywall 常記 closed（2026-09-06：Annals GRADE Guidance 42 與 Minerva
+    EJPRM 2019 都是 closed，PubMed 都標 free）。查不到 DOI（PubMed 沒收錄）回 None。"""
+    try:
+        base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        common = {"db": "pubmed", "retmode": "json", "tool": "paper_fetch"}
+        if UNPAYWALL_EMAIL:
+            common["email"] = UNPAYWALL_EMAIL
+        r = requests.get(base, params={**common, "term": f'"{doi}"[doi]'}, timeout=20,
+                         headers={"User-Agent": UA})
+        if r.status_code != 200 or int(r.json()["esearchresult"].get("count", 0)) == 0:
+            return None
+        r = requests.get(base, params={**common, "term": f'"{doi}"[doi] AND free full text[sb]'},
+                         timeout=20, headers={"User-Agent": UA})
+        if r.status_code != 200:
+            return None
+        return int(r.json()["esearchresult"].get("count", 0)) > 0
+    except Exception as e:
+        print(f"  PubMed 查詢略過: {e}")
+        return None
+
+
+def route_pubmed_free(doi):
+    """PubMed 說免費、Unpaywall 說 closed 的那一類：直接去出版社落地頁找 PDF。
+
+    腳本能過的出版社（沒有 bot 牆）這裡就拿到了；有牆的（Cloudflare、Atypon）會被
+    `_grab_via_landing` 認出並記進 `_BLOCKED`——那不是「無全文」，是 layer 2 direct 路線
+    （真瀏覽器直連出版社、不經 proxy）的觸發條件。"""
+    global _FREE_AT_PUBLISHER
+    _FREE_AT_PUBLISHER = pubmed_free_full_text(doi)
+    if not _FREE_AT_PUBLISHER:
+        print(f"  PubMed free full text: {_FREE_AT_PUBLISHER}"
+              + ("（PubMed 未收錄此 DOI）" if _FREE_AT_PUBLISHER is None else "") + " → 略過")
+        return None
+    print("  PubMed 標記 free full text（Unpaywall 沒說）→ 試出版社落地頁")
+    return _grab_via_landing(f"https://doi.org/{doi}")
+
+
 def routes_for(doi):
-    """依 DOI 前綴排序路線，永遠以 Unpaywall 兜底。"""
+    """依 DOI 前綴排序路線，永遠以 Unpaywall 兜底，最後問 PubMed 的 free 旗標。"""
     d = doi.lower()
     if d.startswith("10.1016"):
         primary = [route_elsevier]
@@ -582,7 +639,7 @@ def routes_for(doi):
         primary = [route_mdpi]
     else:
         primary = []
-    return primary + [route_unpaywall]
+    return primary + [route_unpaywall, route_pubmed_free]
 
 
 def content_check(pdf: bytes, title, out):
@@ -669,8 +726,15 @@ def run_ladder(doi, out, title=None):
     elif _BLOCKED:
         kinds = sorted({k for k, _ in _BLOCKED})
         print(f"\n✗ 候選 URL 有 {len(_BLOCKED)} 個被 bot 牆（{', '.join(kinds)}）擋下，其餘皆無效。")
-        print("  全文多半存在（牆後面就是 PDF）→ 用 layer 2 的真瀏覽器："
-              "library_session.py fetch <DOI> <out.pdf>；或稍後重試。這不是付費牆。")
+        if _FREE_AT_PUBLISHER:
+            print("  PubMed 標記 free full text：出版社站上就是免費的，只是擋腳本 → layer 2 的 direct "
+                  "路線（真瀏覽器直連出版社，不需機構帳號）：library_session.py fetch <DOI> <out.pdf>")
+        else:
+            print("  全文多半存在（牆後面就是 PDF）→ 用 layer 2 的真瀏覽器："
+                  "library_session.py fetch <DOI> <out.pdf>；或稍後重試。這不是付費牆。")
+    elif _FREE_AT_PUBLISHER:
+        print("\n✗ PubMed 標記 free full text，但出版社落地頁上找不到腳本抓得到的 PDF 連結。")
+        print("  → layer 2 的 direct 路線會在真瀏覽器裡找（含中繼下載頁）：library_session.py fetch")
     elif _OA_CLAIMED:
         print("\n✗ Unpaywall 標記 is_oa=true，但所有自動候選 URL 皆失效（in-press 常見）。")
         print("  全文多半存在 → 走機構 resolver 或稍後重試，而非付費牆。")
@@ -686,7 +750,7 @@ def run_ladder(doi, out, title=None):
     return {"schema": 1, "doi": doi, "ok": False, "route": None, "tried": tried,
             "bytes": 0, "sha256": None, "path": None, "resolver_url": resolver,
             "partial_path": partial_path, "reject_reason": reject_reason,
-            "oa_claimed": _OA_CLAIMED,
+            "oa_claimed": _OA_CLAIMED, "free_at_publisher": _FREE_AT_PUBLISHER,
             "blocked_by": [{"kind": k, "url": u} for k, u in _BLOCKED],
             "elapsed_s": round(time.time() - started, 1)}
 

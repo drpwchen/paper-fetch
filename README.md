@@ -42,7 +42,13 @@ DOI
  ├─ 1. Open Access ─────── Unpaywall + Semantic Scholar openAccessPdf → every oa_location,
  │                          PMC→Europe PMC render (PMCID via NCBI idconv, then Europe PMC search),
  │                          landing-page citation_pdf_url (repositories), MDPI's mdpi-res.com CDN
- │                          (the publisher site itself is Cloudflare-403 to scripts)
+ │                          (the publisher site itself is Cloudflare-403 to scripts), and
+ │                          PubMed's "free full text" flag → the publisher's own page (Unpaywall
+ │                          says `closed` for many articles a publisher simply gives away)
+ ├─ 1½. Direct (browser) ─ when layer 1 says the article is free or a bot wall answered the
+ │                          script: a real browser straight to the publisher, no proxy, no
+ │                          login — clears Cloudflare, follows "download starts shortly"
+ │                          interstitials, fetches the PDF from inside the page
  ├─ 2. Publisher TDM API ─ Elsevier / Wiley / Springer official text-mining endpoints
  │                          (you register for your own key; entirely sanctioned)
  │                          ⚠ Springer's direct content/pdf answers scripts with a JS "Client

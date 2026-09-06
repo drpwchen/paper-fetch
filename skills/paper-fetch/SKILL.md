@@ -102,7 +102,8 @@ Try in order; each route falls through to the next, ending at the SFX institutio
 | 10.1002 / 10.1111 | **Wiley** | `paper_fetch.py` → Wiley TDM (`WILEY_TDM_TOKEN`) |
 | 10.1007 / 10.1186 | Springer / BMC | `paper_fetch.py` → OA content/pdf (Springer API key optional). **Since 2026-09 link.springer.com answers every scripted request with a JS "Client Challenge"** (HTTP 200, 3 KB HTML — logged as `js_challenge`, listed in the envelope's `blocked_by`); OA copies then come from PMC / Europe PMC, everything else needs layer 2's real browser |
 | 10.3390 | MDPI | `paper_fetch.py` → `mdpi-res.com` CDN direct (www.mdpi.com is Cloudflare-403 to scripts; the CDN is not) |
-| anything left | — | `paper_fetch.py` → Unpaywall direct |
+| anything left | — | `paper_fetch.py` → Unpaywall direct → PubMed **free full text** flag → publisher page (v1.5.5) |
+| free at the publisher but behind Cloudflare / a bot wall (Minerva, Annals, BMJ-class) | **direct** | `library_session.py fetch` runs the **direct route** on its own when layer 1 reports `free_at_publisher` or `blocked_by`: a real browser straight to the publisher, no proxy, no login; `--direct` forces it. Needs no library at all (v1.5.5) |
 | paywalled (Wiley/LWW/Sage/NEJM…) | institutional | `library_session.py fetch` — **fully automatic** off-campus (see below) |
 
 For OA papers the easiest path is letting Zotero/Zotadata attach it directly — then ZotMoov
