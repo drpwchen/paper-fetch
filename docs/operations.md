@@ -47,6 +47,7 @@ own exit code now:
 | `3` | auth failed / session expired | no — fix the session |
 | `4` / `5` | profile busy / watchdog | no — retry serially |
 | `6` | no route for this publisher prefix | no — check holdings, consider adding one |
+| `7` | blocked — every attempt (incl. the headful-nav retry) ended at a bot wall | no — wait and retry, or finish from your own browser |
 
 ==Any "no full text available" conclusion is only valid if the session was valid at the time.==
 If your batch log records exit codes, record which ones — a log that only says "failed" cannot
@@ -68,8 +69,10 @@ of the "successful" downloads were whole volumes.**
 With a title, the fetch verifies the article is actually in the file and, for a volume, cuts out
 the pages it sits on — keeping the volume as `<stem>_volume.pdf`, because it took an
 institutional session to obtain and it is the only way to re-check the cut. Verdicts:
-`match` · `volume_like` (cut) · `title_absent` · `no_text` · `unreadable`; the last three are
-reported, never silently accepted.
+`match` · `volume_like` (cut) · `title_absent` (rejected: the file is moved to
+`<stem>.rejected.pdf`, the ladder continues, and the run is non-zero if nothing better turns
+up — an aggregator had filed a different author's preprint under the DOI) · `no_text` ·
+`unreadable`; the last two are reported, never silently accepted.
 
 Downstream, a whole volume is worse than a missing file: a reader (human or LLM) will produce a
 confident answer about the wrong study.

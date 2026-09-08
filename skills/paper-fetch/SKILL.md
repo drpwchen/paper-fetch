@@ -100,7 +100,7 @@ Try in order; each route falls through to the next, ending at the SFX institutio
 | OA (any) | — | Zotero **Find Available PDF** or **Zotadata** right-click → attaches in place ✅ |
 | 10.1016 | Elsevier / ScienceDirect | `paper_fetch.py` → Elsevier TDM (`ELSEVIER_TDM_KEY`); when TDM serves only an in-press cover, **or only the first page because the key is not entitled** (`X-ELS-Status: WARNING … not entitled`, HTTP 200 — v1.5.1), falls through to the ClinicalKey `ck` route (headful window, organization modal auto-answered — v1.4.0). `library_session.py fetch … --skip-layer1` forces `ck` directly |
 | 10.1002 / 10.1111 | **Wiley** | `paper_fetch.py` → Wiley TDM (`WILEY_TDM_TOKEN`) |
-| 10.1007 / 10.1186 | Springer / BMC | `paper_fetch.py` → OA content/pdf (Springer API key optional). **Since 2026-09 link.springer.com answers every scripted request with a JS "Client Challenge"** (HTTP 200, 3 KB HTML — logged as `js_challenge`, listed in the envelope's `blocked_by`); OA copies then come from PMC / Europe PMC, everything else needs layer 2's real browser |
+| 10.1007 / 10.1186 | Springer / BMC | `paper_fetch.py` → OA content/pdf (Springer API key optional). **Since 2026-09 link.springer.com answers every scripted request with a JS "Client Challenge"** (HTTP 200, 3 KB HTML — logged as `js_challenge`, listed in the envelope's `blocked_by`); OA copies then come from PMC / Europe PMC. Through the proxy the same wall answers `request.get`; `fetch` retries once as a real navigation + in-page `fetch()`, and if the challenge still stands it exits `7` (v1.5.6) — the finish is then your own logged-in browser |
 | 10.3390 | MDPI | `paper_fetch.py` → `mdpi-res.com` CDN direct (www.mdpi.com is Cloudflare-403 to scripts; the CDN is not) |
 | anything left | — | `paper_fetch.py` → Unpaywall direct → PubMed **free full text** flag → publisher page (v1.5.5) |
 | free at the publisher but behind Cloudflare / a bot wall (Minerva, Annals, BMJ-class) | **direct** | `library_session.py fetch` runs the **direct route** on its own when layer 1 reports `free_at_publisher` or `blocked_by`: a real browser straight to the publisher, no proxy, no login; `--direct` forces it. Needs no library at all (v1.5.5) |
@@ -157,8 +157,8 @@ python library_session.py routes   # per-route scorecard + holdings gaps
   of hanging, and tree-kills its own chromium. Never wrap the script in a bare `timeout` —
   that kills the parent and orphans the browser.
 - **Exit codes**: `0` PDF · `1` usage · `2` 路線跑了但回空 · `3` 認證失敗／session 過期 ·
-  `4` busy · `5` watchdog · `6` 此 prefix 無路線。==只有 `2` 是關於這篇論文的證據==；
-  其餘都是「修好再跑」。見下面「批次取件的兩條硬規矩」。
+  `4` busy · `5` watchdog · `6` 此 prefix 無路線 · `7` 被 bot 牆擋到底（含 headful nav 重試）。
+  ==只有 `2` 是關於這篇論文的證據==；其餘都是「修好再跑」。見下面「批次取件的兩條硬規矩」。
 - ⚠️ `is_oa: true` from Unpaywall does **not** guarantee a PDF: hybrid and ahead-of-print
   articles report OA with no usable `url_for_pdf`. Fall through instead of giving up.
 - **Rate awareness**: every proxy hit is logged; run `stats` to watch for the first block
@@ -182,9 +182,11 @@ python library_session.py routes   # per-route scorecard + holdings gaps
 | `2` | 路線跑了，回來是空的 | ==只有這個==是關於論文本身的證據 |
 | `3` | **認證失敗／session 過期** | 對論文**零資訊** → 修 session 再跑 |
 | `4` / `5` | profile 忙／watchdog | 串行重試，不是缺全文 |
-| `6` | 這個出版社還沒有路線 | 館藏可能仍有訂閱 → 值得補路線 |
+| `6` | 這個出版社還沒有路線 | 館藏可能仍有訂閱 → 值得補路線（v1.5.6 起會先解 doi.org 落地 host 對路線表，期刊換出版社不再誤判 `6`） |
+| `7` | **被 bot 牆擋到底**（headless 請求＋headful nav 重試都是牆） | 對論文零資訊 → 等一陣子再跑，或用自己登入的瀏覽器收尾 |
 
-（`3` 與 `6` 以前都混在 `2` 裡，這正是那九筆假 failed 的成因。`check` 的 EXPIRED 也回 `3`。）
+（`3` 與 `6` 以前都混在 `2` 裡，這正是那九筆假 failed 的成因。`check` 的 EXPIRED 也回 `3`。
+`7` 在 v1.5.6 前也是 `2`——Springer 對館內有訂閱的文章回 Client Challenge，被記成「路線跑了回空」。）
 
 **③ SFX／link resolver 的服務清單不是館藏全貌。** 它免登入可讀，可以當「先試哪條路」的排序
 訊號，但**不能當判決**：有期刊在清單上完全沒有全文 target，館方其實訂了（`10.1136` BMJ 即是
@@ -245,8 +247,9 @@ python pdf_verify.py <pdf> --title "<article title>" [--extract]
    **不要讓整批帶著死 session 跑**。
 4. Run `paper_fetch.py --title "<title>" <DOI> <out.pdf>` per DOI → PDFs to a staging folder；
    仍失敗的走 `library_session.py fetch <DOI> <out.pdf> --title "<title>"`（==SERIAL==）。
-5. 逐筆記 exit code（`2` 才是缺全文；`3` 認證、`6` 無路線要另外處理），並記下
-   `pdf_verify` 的判定；`volume_like` 已自動切頁，`title_absent`／`no_text` 要人工看一眼。
+5. 逐筆記 exit code（`2` 才是缺全文；`3` 認證、`6` 無路線、`7` 被牆擋要另外處理），並記下
+   `pdf_verify` 的判定；`volume_like` 已自動切頁，`title_absent` 已自動退成 `<stem>.rejected.pdf`
+   （不算成功），`no_text` 要人工看一眼。==不要用「檔案存不存在」當成功判準==，看 exit code。
 6. Drag the batch of PDFs onto their items; ZotMoov auto-processes all (one move per file).
 7. Summary: added / already-exists / PDF-linked / needs-SFX / 內容驗證異常。
 
@@ -268,7 +271,9 @@ and stop if `stats` shows a block.
 | `library_session.py` 印 `reader_html`／「疑無訂閱」 | 出版社給的是閱讀器頁不是 PDF ＝ **無訂閱或年份在 coverage 外**，不是路線壞、不是認證。==不要帶 `--title` 重跑==（`--title` 只管驗證，不影響取得）→ 記成「無管道」，給 SFX 連結或跟作者要 |
 | `library_session.py` 印 `timeout`（proxy 30 s 無回應） | 先 `check`；session VALID 就是出版社節流／無訂閱（Sage 對無權限請求會拖到 timeout），不要立刻重試，走 SFX |
 | 抓到的 PDF 是整本增刊 | 給 `--title` 就會自動切出該篇（整本留成 `<stem>_volume.pdf`）；或事後 `pdf_verify.py <pdf> --title "…" --extract` |
-| `pdf_verify` 判 `title_absent`／`no_text` | 不自動處理——人工開檔看一眼（掃描件、勘誤頁、抓到別篇都長這樣） |
+| `library_session.py` exit `7`（被牆擋到底） | 出版社的 bot 牆連 headful nav 都擋（Springer 經 proxy 的 Fastly Client Challenge 就是）。對論文零資訊：等一陣子再跑，或從使用者自己登入的瀏覽器開文章頁、頁內 `fetch()` PDF 收尾 |
+| `pdf_verify` 判 `title_absent` | 是 PDF 但不是這篇（OA 聚合站把別篇掛在同一 DOI 下最常見）→ 已自動移成 `<stem>.rejected.pdf`、階梯續走、不算成功。人工開檔看一眼；確定是這篇再改名回來 |
+| `pdf_verify` 判 `no_text` | 抽不出文字（掃描件／加密）→ 不擋，人工開檔看一眼 |
 | PDF not moving to linked folder | Check ZotMoov `enable_automove`; for already-synced files temporarily set `process_synced_files=true`, then "Move + Convert to Linked" |
 | Zotero not running | Local API needs Zotero open |
 | Duplicate detected | Show existing item's citekey |

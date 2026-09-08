@@ -85,7 +85,12 @@ working code:
 
 | Shape | How it works | DOI prefixes |
 |---|---|---|
-| **template** (`kind: tpl`) | build the PDF URL from a host + path template | `10.1002`/`10.1111` Wiley · `10.1007`/`10.1186` Springer/BMC · `10.1056` NEJM · `10.1177` Sage · `10.1080` T&F · `10.2214` AJR · `10.1148` Radiology/RSNA · `10.1142` World Scientific |
+| **template** (`kind: tpl`) | build the PDF URL from a host + path template; a bot wall on the headless request path gets one retry as a real page navigation + in-page `fetch()` | `10.1002`/`10.1111` Wiley · `10.1007`/`10.1186` Springer/BMC · `10.1056` NEJM · `10.1177` Sage (+ `10.4187` Respiratory Care, at Sage since 2025) · `10.1080` T&F · `10.2214` AJR · `10.1148` Radiology/RSNA · `10.1142` World Scientific |
+
+A prefix that is not in the table is not yet "no route": journals move publishers and keep their
+DOI prefix, so `fetch` resolves `doi.org` once and, when the landing host belongs to a listed
+route (Liebert `10.1089` → `journals.sagepub.com` since Sage bought them, for instance), uses that
+route under the new prefix. Only when the host matches nothing is it exit `6`.
 | **citation-meta** (`kind: meta`) | resolver → article HTML's `<meta name="citation_pdf_url">` → fetch with Referer. Headless. | `10.1001` JAMA · `10.1093` Oxford · `10.1542` Pediatrics · `10.1183` ERJ · `10.3171` J Neurosurg · `10.1038` Nature |
 | **citation-meta + headful nav** (`kind: meta, nav: true`) | same, but the resolver runs as a real headful navigation to clear a Cloudflare challenge | `10.1136` BMJ · `10.3174` AJNR · `10.2967` J Nucl Med |
 | **signed-URL** (`kind: lww`) | multi-step walk to a signed PDF URL: resolver → scrape article number → viewer HTML → signed `pdfUrl` with the right Referer chain, plus an Ovid-OCE fallback for ahead-of-print articles and concurrent-licence-seat (E3) back-off | `10.1097`/`10.1161`/`10.1213`/`10.2215` LWW/Ovid |
@@ -214,9 +219,10 @@ your library's SFX link for a manual finish. `sha256` lets batch callers dedupe.
 | `4` | profile busy (another fetch holds the lock) — `library_session.py` only | **retry serially** — not a missing paper |
 | `5` | watchdog abort (`PAPERFETCH_TIMEOUT_S`, default 240 s) — `library_session.py` only | **retry once** — not a missing paper |
 | `6` | no route for this publisher prefix — `library_session.py` only | check `holdings.py`; a subscribed prefix is worth a new route |
+| `7` | **blocked** — every attempt, including the headful-navigation retry, ended at a bot wall (`js_challenge` / `cf_*` / `rate_limited`) — `library_session.py` only | wait, then retry; or fetch from your own logged-in browser. The wall answered, not the publisher |
 
-Only `2` tells you anything about the article. `3`, `4`, `5` and `6` all mean "fix something and
-try again" — recording any of them as "no full text" is the single easiest way to wrongly
+Only `2` tells you anything about the article. `3`, `4`, `5`, `6` and `7` all mean "fix something
+and try again" — recording any of them as "no full text" is the single easiest way to wrongly
 conclude a paper is unobtainable. Codes `3` and `6` used to be folded into `2`, and a batch that
 started with an expired session recorded nine papers as paywalled when one automatic `login`
 would have got all nine. ==Run `library_session.py check` before a batch and abort the whole
@@ -237,6 +243,14 @@ batch, 20% of the "successful" downloads were whole volumes, one of them 563 pag
 cuts out the pages the article sits on (keeping the volume as `<stem>_volume.pdf`). The test is
 the longest **contiguous** run of the title in a page's text — a bag-of-words score matches a
 proceedings page whose neighbouring abstracts happen to share vocabulary.
+
+The same test catches the *other* wrong file: an OA aggregator handing back a different paper
+it has filed under this DOI (Unpaywall / Semantic Scholar pointed one Elsevier DOI at an OSTI
+preprint by another author with the same surname). Since 1.5.6 a PDF whose first pages do not
+carry the title (`title_absent`) is **not** left under the requested name — it is set aside as
+`<stem>.rejected.pdf`, the ladder keeps going (the institutional route then found the real
+article), and the run does not exit `0`. The envelope carries `rejected_path`. Open the file if
+you want to know what it was; rename it back only if you can see it *is* the article.
 
 ### ⚠ Before you batch or parallelize
 

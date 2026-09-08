@@ -96,6 +96,20 @@ it carried a remember-me token. When an automation profile fails where a human's
 succeeds on the *same URL*, diff the two — response bodies of the auth call, then the DOM —
 before blaming the publisher.
 
+Sixth (2026-09-08): **a wall that answers the automation profile is not a wall that answers
+the library.** Springer through the proxy, article the library holds: `request.get` on the
+PDF URL → "Client Challenge" (Fastly) twice; a headful navigation to the article page → the
+same challenge, whose `script.js` answers HTTP 400 — for patchright's Chromium *and* for the
+real Google Chrome binary launched under CDP. The user's own logged-in Chrome, same proxy, same
+URL, passed on the first try and the in-page `fetch()` returned the 1.6 MB PDF. So: the tpl
+route now retries once as a real navigation (it covers walls that only block `request.get`),
+a wall that survives that retry is exit `7`, never `2`, and the finish for that case is the
+user's own browser, not another automation trick. Also: **a DOI prefix names who minted the
+DOI, not who serves it today** — journals move publishers (Respiratory Care `10.4187` → Sage,
+Liebert `10.1089` → Sage) and their back catalogue moves with them. `fetch` resolves `doi.org`
+once for an unknown prefix and matches the landing host against the routes before saying
+`no_route`.
+
 ## Calling it from an orchestrator
 
 - `paper_fetch.py --json <DOI> <out>` prints **exactly one JSON envelope on stdout** (all
@@ -103,9 +117,17 @@ before blaming the publisher.
   resolver_url?, elapsed_s}`. Parse that; do not scrape logs.
 - **Exit codes** (same table for both scripts): `0` PDF obtained · `1` usage error · `2` a route
   ran and came back empty · `3` **auth failed / session expired** · `4` profile busy · `5`
-  watchdog abort · `6` no route for this publisher prefix.
-- **Only `2` is evidence about the PAPER.** `3`, `4`, `5` and `6` all mean "fix it and retry" —
-  recording any of them as unavailable is the easiest way to wrongly write a paper off.
+  watchdog abort · `6` no route for this publisher prefix · `7` **blocked** — every attempt
+  (headless request, then the headful-navigation retry) ended at a bot wall.
+- **Only `2` is evidence about the PAPER.** `3`, `4`, `5`, `6` and `7` all mean "fix it and
+  retry" — recording any of them as unavailable is the easiest way to wrongly write a paper
+  off. `7` in particular used to be `2`: Springer's JS challenge on a *subscribed* article
+  was being logged as "route ran, came back empty".
+- **With `--title`, exit `0` also means "verified to be this article".** A PDF whose first
+  pages do not carry the title is moved to `<stem>.rejected.pdf` and the ladder continues; if
+  nothing better turns up the run is non-zero and the envelope says `rejected_path`. Do not
+  key success on "a file exists under the requested name" — that is exactly how an OSTI
+  preprint by a different author got filed as an Elsevier article.
 - **Run `check` before a batch, and abort the whole batch if the session is invalid.** A dead
   session produces one failure per paper, and every one of them reads like "this paper has no
   route": nine papers were written off as paywalled that way while `3` still shared code `2` —

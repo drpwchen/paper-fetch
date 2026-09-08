@@ -108,11 +108,16 @@ Bounded failure. Login/CAPTCHA and proxy interstitials can hang indefinitely; a 
 
 Exit codes: 0 ok · 1 usage · 2 a route ran and came back empty · 3 AUTH (login failed /
   session expired) · 4 profile busy (lock) · 5 watchdog abort · 6 no route for this
-  publisher prefix.
+  publisher prefix · 7 BLOCKED (every attempt ended at a bot wall — js_challenge / cf_* /
+  rate_limited — including the headful-nav retry).
   ==Only 2 is evidence about the PAPER.== 3 says nothing about it (fix the session and
   retry); 6 says the publisher has no route yet (holdings may still say subscribed);
-  4 and 5 mean "retry serially". Before 2026-08-22 codes 2/3/6 were one code, and a batch
-  run with an expired session logged nine "no full text" verdicts that were all wrong.
+  4 and 5 mean "retry serially"; 7 means "wait, then retry or finish by hand" — the wall
+  answered, not the publisher. Before 2026-08-22 codes 2/3/6 were one code, and a batch
+  run with an expired session logged nine "no full text" verdicts that were all wrong;
+  before 1.5.6 a bot wall was code 2 and read as "no full text" the same way (issue #4).
+  With --title, a PDF whose first pages do not carry the title is set aside as
+  `<stem>.rejected.pdf` and the run does NOT exit 0 (issue #6) — see _content_check.
 """
 from __future__ import annotations
 
@@ -236,12 +241,22 @@ ROUTES: dict[str, dict] = {
     # {doi}_reference.pdf (observed 2026-08-19: canonical 404, _reference.pdf = 70-page
     # proof). citation_pdf_url still advertises the 404 canonical URL, so a meta route
     # would not find it either — hence the explicit alt path.
+    # `landing` (optional, tpl only): the article page on the same host. Used by the headful
+    # retry (issue #4): when the headless request.get comes back as a JS bot wall
+    # (Springer's "Client Challenge" — even through the proxy, even with a valid session),
+    # a REAL navigation to the landing page clears it, and an in-page fetch() of the PDF URL
+    # then succeeds. Without `landing` the retry goes through the proxied doi.org resolver.
     "10.1007": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf", "holdings_pub": "springer",
-                "alt_paths": ["/content/pdf/{doi}_reference.pdf"]},                                               # Springer
+                "alt_paths": ["/content/pdf/{doi}_reference.pdf"], "landing": "/article/{doi}"},                  # Springer
     "10.1186": {"kind": "tpl", "host": "link.springer.com",       "path": "/content/pdf/{doi}.pdf", "holdings_pub": "springer",
-                "alt_paths": ["/content/pdf/{doi}_reference.pdf"]},                                               # BMC ⚠ real PDF lives on per-journal *.biomedcentral.com, often 404
+                "alt_paths": ["/content/pdf/{doi}_reference.pdf"], "landing": "/article/{doi}"},                  # BMC ⚠ real PDF lives on per-journal *.biomedcentral.com, often 404
     "10.1056": {"kind": "tpl", "host": "www.nejm.org",            "path": "/doi/pdf/{doi}", "holdings_pub": "new england"},                      # NEJM ✅
-    "10.1177": {"kind": "tpl", "host": "journals.sagepub.com",    "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "sage"},        # Sage ✅ (OnlineFirst outside coverage → 403; unsubscribed journal → reader_html then timeouts — neither is a route bug; holdings lists only 3 Sage titles)
+    "10.1177": {"kind": "tpl", "host": "journals.sagepub.com",    "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "sage", "landing": "/doi/{doi}"},        # Sage ✅ (OnlineFirst outside coverage → 403; unsubscribed journal → reader_html then timeouts — neither is a route bug; holdings lists only 3 Sage titles)
+    # Respiratory Care (AARC) — self-published on HighWire (rc.rcjournal.com) until 2024, at
+    # Sage since 2025: doi.org now 302s to journals.sagepub.com and the old /content/…full.pdf
+    # is 403 (issue #5). A DOI prefix names the registrant, not the CURRENT host — see
+    # `_route_by_host` for the general case (journals move; prefixes don't).
+    "10.4187": {"kind": "tpl", "host": "journals.sagepub.com",    "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "sage", "landing": "/doi/{doi}"},        # Respiratory Care → Sage (2025)
     "10.1080": {"kind": "tpl", "host": "www.tandfonline.com",     "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "taylor"},        # Taylor & Francis ✅
     "10.2214": {"kind": "tpl", "host": "www.ajronline.org",       "path": "/doi/pdf/{doi}?download=true"},        # AJR (Atypon) ✅ (meta route has no citation_pdf_url)
     "10.1148": {"kind": "tpl", "host": "pubs.rsna.org",           "path": "/doi/pdf/{doi}?download=true", "holdings_pub": "radiological"},        # Radiology / RSNA ✅
@@ -316,6 +331,69 @@ ROUTES: dict[str, dict] = {
     #     library; not fixable client-side. `_classify` flags this as
     #     `proxy_host_unregistered` so you can tell it apart.
 }
+
+# Landing hosts of the `meta`/`lww`/`ck` routes, which carry no `host` of their own (their
+# resolver is doi.org). Only used by `_route_by_host` to map an UNKNOWN prefix onto a known
+# route by where doi.org actually lands; the tpl/meta entries with an explicit `host` are
+# matched directly and need no entry here.
+_HOST_HINTS: dict[str, str] = {
+    "academic.oup.com": "10.1093",
+    "jamanetwork.com": "10.1001",
+    "www.nature.com": "10.1038",
+    "publications.aap.org": "10.1542",
+    "journals.lww.com": "10.1097",
+    "www.sciencedirect.com": "10.1016",
+    "linkinghub.elsevier.com": "10.1016",
+}
+_HOST_RESOLVE_HOPS = 6
+
+
+def _route_by_host(doi: str) -> tuple[str, dict] | None:
+    """Unknown prefix → resolve doi.org once and match the LANDING HOST against the routes.
+
+    A DOI prefix identifies the registrant that minted the DOI, not the site that serves the
+    article today. Journals move (Respiratory Care 10.4187 → Sage in 2025, CJASN 10.2215 →
+    LWW) and their back catalogue moves with them, so "prefix not in ROUTES" was answered
+    `no_route` (exit 6) for articles a listed route would have fetched with one dict
+    lookup's difference (issue #5). Follow the redirect chain without a proxy or a browser
+    (Location headers only — no body, no JS; a bot wall on the final hop still tells us the
+    host), and return (`prefix that owns the route`, route) or None. Cheap: one call per
+    unknown prefix per fetch, nothing on the proxy."""
+    try:
+        import requests
+    except ImportError:
+        return None
+    hosts: dict[str, str] = {}
+    for p, r in ROUTES.items():          # first listed prefix owns a shared host (10.1177
+        if r.get("host"):                # for Sage, not the 10.4187 alias that came later)
+            hosts.setdefault(r["host"], p)
+    for h, p in _HOST_HINTS.items():
+        if p in ROUTES:
+            hosts.setdefault(h, p)
+    url = f"https://doi.org/{doi}"
+    seen: list[str] = []
+    for _ in range(_HOST_RESOLVE_HOPS):
+        try:
+            r = requests.get(url, allow_redirects=False, timeout=15, stream=True,
+                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                    "paper_fetch/1.5 (route lookup)"})
+            r.close()
+        except Exception as e:
+            print(f"[route] doi.org lookup failed ({_classify_exc(e)}) — cannot map the host",
+                  file=sys.stderr)
+            return None
+        host = urlsplit(url).netloc.lower()
+        seen.append(host)
+        if host in hosts:
+            owner = hosts[host]
+            return owner, ROUTES[owner]
+        loc = r.headers.get("location")
+        if not (300 <= r.status_code < 400 and loc):
+            break
+        url = urljoin(url, loc)
+    print(f"[route] doi.org lands on {' → '.join(seen[1:] or seen)} — no route serves that host",
+          file=sys.stderr)
+    return None
 
 
 # --- secret store ----------------------------------------------------------
@@ -574,10 +652,20 @@ def _within(ts: str, hours: int) -> bool:
         return False
 
 
+# Statuses that mean "a bot wall answered instead of the publisher" — never evidence about
+# the article. `_LAST_WALL` remembers the most recent one so run_fetch can end in "blocked"
+# (exit 7) instead of "fail" (exit 2) when a wall was the last word (issue #4).
+_WALL_STATUSES = frozenset({"js_challenge", "cf_challenge", "cf_block", "rate_limited"})
+_LAST_WALL: str | None = None
+
+
 def _warn_if_blocked(status: str) -> None:
     """When a real server-side block appears, report the daily volume that triggered it —
     that's how the true rate ceiling gets calibrated. Bulk download blocks the whole
     institution's IP, so this matters for everyone, not just you."""
+    global _LAST_WALL
+    if status in _WALL_STATUSES:
+        _LAST_WALL = status
     if status not in ("cf_challenge", "cf_block", "rate_limited"):
         return
     n24 = sum(1 for r in _read_log() if r.get("kind") == "proxy" and _within(r.get("ts"), 24))
@@ -1048,8 +1136,9 @@ def _tpl_verdict(status: str, sub, covered, suspect_unsub: bool, doi: str) -> st
         return "fail"
     if status == "js_challenge":
         print("[fetch] 出版社回的是 JS bot 挑戰頁（Springer Client Challenge），不是閱讀器頁、"
-              "不是認證問題；重新登入無用。headless request.get 過不了，需要真正的頁面導航"
-              f"（headful nav）。{_sfx_hint(doi)}", file=sys.stderr)
+              "不是認證問題；重新登入無用。headless request.get 過不了 → 會自動改用真正的"
+              "頁面導航（headful nav ＋頁內 fetch）重試一次；連那也被擋就是牆（exit 7），"
+              f"等一陣子再來。{_sfx_hint(doi)}", file=sys.stderr)
         return "fail"
     if status in ("cf_challenge", "cf_block", "rate_limited", "proxy_host_unregistered",
                   "redirect_loop", "request_error", "no_response", "unknown_prefix"):
@@ -1398,6 +1487,94 @@ def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> str:
         print(f"[proxy] {status} ({phase}, http {resp.status}, {len(body)}B)"
               + (f" · paywall marker「{marker}」" if marker else "")
               + (f" — trying alt path" if u != urls[-1] else ""), file=sys.stderr)
+    return status
+
+
+class _Resp:
+    """Just enough of a Playwright response for `_classify` to score an in-page fetch()."""
+
+    def __init__(self, status: int, ctype: str, url: str):
+        self.status, self.url, self.headers = status, url, {"content-type": ctype}
+
+
+def _proxy_nav_pdf(page, doi: str, out: Path, route: dict) -> str:
+    """tpl route, phase 2 (issue #4): a REAL navigation to the article page through the
+    proxy, then the PDF URL fetched from inside that page. Returns a `_classify` status.
+
+    Why: Springer answers `page.request.get` on the proxied /content/pdf URL with its JS
+    "Client Challenge" — headless or headful, valid session or not — while the same URL
+    fetched from a page the browser has actually navigated to comes back as the PDF on the
+    first try (10.1007/s00455-021-10310-7, subscribed, 2026-09-08: js_challenge ×2 from
+    request.get; 1.6 MB PDF via in-page fetch). The wall is on the automation profile's
+    *request path*, not on the entitlement, so `js_challenge` must not be read as "route
+    ran, came back empty". Mechanics are the direct route's (`_direct_pdf`): navigate,
+    wait the challenge out, fetch with `credentials:'include'` in the page's own network
+    stack. The proxy's per-subdomain login handshake can bounce the navigation to the login
+    form — it is submitted there (`_login_submit_here`), like the meta route does."""
+    prefix = doi.split("/")[0]
+    phost = _proxy_host(route["host"])
+    landing = (f"https://{phost}{route['landing'].format(doi=doi)}" if route.get("landing")
+               else f"https://doi-org.{PROXY_SUFFIX}/{doi}")
+    urls = [f"https://{phost}{route['path'].format(doi=doi)}"] + [
+        f"https://{phost}{p.format(doi=doi)}" for p in route.get("alt_paths", [])]
+
+    def log(status: str, **kw) -> None:
+        _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "headful_nav",
+              "status": status, **kw})
+
+    _throttle()
+    print(f"[proxy] headful nav → {landing[:100]}", file=sys.stderr)
+    for attempt in (1, 2):
+        try:
+            page.goto(landing, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception as e:
+            st = _classify_exc(e)
+            log(st, step="landing", note=repr(e)[:100])
+            print(f"[proxy] landing failed: {st}", file=sys.stderr)
+            return st
+        if page.locator(PASS_SEL).count() > 0:      # bounced to the proxy login → handshake here
+            if attempt == 2 or not _login_submit_here(page):
+                log("auth_expired", step="landing")
+                return "auth_expired"
+            continue
+        break
+    deadline = time.time() + DIRECT_CHALLENGE_WAIT_S
+    waited = False
+    while _challenged(page):
+        if time.time() > deadline:
+            log("js_challenge", step="landing", url=page.url[:120])
+            _warn_if_blocked("js_challenge")
+            print(f"[proxy] bot challenge did not clear in {DIRECT_CHALLENGE_WAIT_S}s "
+                  f"({page.title()[:40]!r}) — the wall, not the paper; retry later",
+                  file=sys.stderr)
+            return "js_challenge"
+        waited = True
+        time.sleep(2)
+    if waited:
+        print("[proxy] bot challenge cleared", file=sys.stderr)
+        time.sleep(1.5)
+    status = "no_response"
+    for u in urls:
+        try:
+            st, ct, final, body = _page_fetch(page, u)
+        except Exception as e:
+            status = _classify_exc(e)
+            log(status, step="pdf", url=u[:120], note=repr(e)[:100])
+            print(f"[proxy] {status} (headful_nav) — {repr(e)[:80]}", file=sys.stderr)
+            continue
+        status = _classify(_Resp(st, ct, final), body)
+        marker = _paywall_marker(body) if status == "reader_html" else None
+        log(status, http=st, bytes=len(body), alt=(u != urls[0]) or None, note=marker)
+        if status == "pdf":
+            out.write_bytes(body)
+            print(f"[proxy] OK (headful_nav, in-page fetch) -> {out} ({len(body)} bytes)"
+                  + ("（alt path — 可能是 in-press proof 版）" if u != urls[0] else ""),
+                  file=sys.stderr)
+            return "pdf"
+        _warn_if_blocked(status)
+        print(f"[proxy] {status} (headful_nav, http {st}, {len(body)}B)"
+              + (f" · paywall marker「{marker}」" if marker else "")
+              + (" — trying alt path" if u != urls[-1] else ""), file=sys.stderr)
     return status
 
 
@@ -2157,21 +2334,28 @@ def _drop_stale_partial(out: Path) -> None:
     """Layer 1 leaves its gate-rejected bytes as `<out>.partial` (cover sheet / TDM preview).
     Once the proxy route has produced the real article that file is only a trap for the next
     reader — a regenerable download, so a direct unlink is fine."""
-    partial = out.with_name(out.name + ".partial")
-    if partial.exists():
-        try:
-            partial.unlink()
-            print(f"[fetch] removed layer-1 reject {partial.name} (superseded)", file=sys.stderr)
-        except OSError:
-            pass
+    for stale in (out.with_name(out.name + ".partial"), _rejected_path(out)):
+        if stale.exists():
+            try:
+                stale.unlink()
+                print(f"[fetch] removed earlier reject {stale.name} (superseded)", file=sys.stderr)
+            except OSError:
+                pass
+
+
+def _rejected_path(out: Path) -> Path:
+    """`<stem>.rejected.pdf` — a valid PDF that is NOT this article (issue #6)."""
+    return out.with_name(out.stem + ".rejected.pdf")
 
 
 def _sfx_hint(doi: str) -> str:
     return f" SFX: {SFX.format(doi=doi)}" if SFX else ""
 
 
-def _content_check(out: Path, title: str | None) -> None:
+def _content_check(out: Path, title: str | None, doi: str | None = None) -> bool:
     """Is the file we just wrote actually THIS article? (`pdf_verify`, only with a title.)
+    Returns False when the file was set aside as `<stem>.rejected.pdf` — the caller must
+    not report success.
 
     ==A byte-level check cannot tell "the article" from "the issue the article is in".==
     Conference abstracts routinely carry the supplement's DOI, so every route — TDM API,
@@ -2179,19 +2363,37 @@ def _content_check(out: Path, title: str | None) -> None:
     48 MB file that passes `%PDF` + size and gets logged `ok` (2026-08; 20% of one 49-paper
     batch). A whole-volume PDF fed to a full-text screen produces a confident answer about
     the wrong study, which is worse than a missing file. Volumes are cut down to the
-    article here, with the volume kept as `<stem>_volume.pdf`."""
+    article here, with the volume kept as `<stem>_volume.pdf`.
+
+    `title_absent` (text extracted, title nowhere in the first pages, not a volume) is a
+    REJECTION since 1.5.6 (issue #6): Unpaywall handed back a different Huang 2009 — an OSTI
+    preprint it associates with the DOI — and a file under the requested name reads as
+    success to every batch caller. The bytes are kept as `<stem>.rejected.pdf` for a human
+    to look at (the scanned-layout and title-in-an-image cases are real, just rarer than
+    "wrong article"); `no_text` stays a warning because there is nothing to compare."""
     if not title:
-        return
+        return True
     try:
         import pdf_verify      # same directory, like paper_config
     except ImportError:
         print("[verify] pdf_verify unavailable → skipped", file=sys.stderr)
-        return
+        return True
     res = pdf_verify.verify(out, title)
     if res["verdict"] == "match":
         print(f"[verify] {res['detail']}", file=sys.stderr)
-        return
+        return True
     print(f"[verify] ⚠ {res['verdict']} — {res['detail']}", file=sys.stderr)
+    if res["verdict"] == "title_absent":
+        rej = _rejected_path(out)
+        out.replace(rej)
+        _log({"kind": "verify", "doi": doi, "status": "title_absent", "path": str(rej),
+              "ratio": res.get("ratio")})
+        print(f"[verify] ✗ a PDF, but not this article (title not in its first pages) → set "
+              f"aside as {rej.name}; NOT reported as success. Open it to see what it is "
+              f"(another paper with the same DOI at an aggregator, an erratum, an abstract "
+              f"page…) — rename it back only if you can see it IS the article.",
+              file=sys.stderr)
+        return False
     if res["verdict"] == "volume_like":
         cut = pdf_verify.extract(out, title)
         if cut["extracted"]:
@@ -2201,6 +2403,7 @@ def _content_check(out: Path, title: str | None) -> None:
         else:
             print(f"[verify] could not locate the article inside the volume "
                   f"({cut['reason']}) — file left as is, check by hand", file=sys.stderr)
+    return True
 
 
 def run_fetch(pw, doi: str, out: Path, title: str | None = None,
@@ -2216,10 +2419,12 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
     `force_direct` runs ①½ regardless of what ① said (`--direct`).
 
     ==Returns a REASON, not a bool==: "ok" | "auth" (session/login problem) | "no_route"
-    (no route for this publisher) | "fail" (a route ran and came back empty). main() maps
-    these onto distinct exit codes, because a caller that cannot tell "the session died"
-    from "there is no route" writes down N false "no full text" verdicts for what is one
-    expired login — exactly what happened to a 9-paper batch on 2026-08-21.
+    (no route for this publisher) | "blocked" (every attempt ended at a bot wall —
+    js_challenge / cf_* / rate_limited; the wall, not the paper) | "fail" (a route ran and
+    came back empty). main() maps these onto distinct exit codes, because a caller that
+    cannot tell "the session died" from "there is no route" writes down N false "no full
+    text" verdicts for what is one expired login — exactly what happened to a 9-paper batch
+    on 2026-08-21. "blocked" was split out of "fail" for the same reason (issue #4).
 
     Headless is the default (patchright clears most CF). Two cases MUST be headful:
       · lww  — the proxy's "please wait" JS interstitial hangs headless
@@ -2228,8 +2433,22 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
     `is_logged_in` (the gate page) can report VALID while the per-subdomain proxy
     authorization has separately expired → the proxy returns an auth page. So any proxy
     "auth" failure forces one fresh login + retry."""
+    global _LAST_WALL
+    _LAST_WALL = None
     prefix = doi.split("/")[0]
     route = ROUTES.get(prefix, {})
+    if not route:
+        # Unknown prefix ≠ no route: the journal may live on a host a listed route already
+        # serves (issue #5). One doi.org lookup settles it; the alias is registered so every
+        # ROUTES[prefix] lookup downstream (tpl template, scorecard) sees the same route.
+        found = _route_by_host(doi)
+        if found:
+            owner, route = found
+            ROUTES[prefix] = dict(route, aliased_from=owner)
+            print(f"[route] {prefix} is not in ROUTES, but doi.org lands on {route.get('host') or owner}"
+                  f" → using the {owner} route ({route['kind']})", file=sys.stderr)
+            _log({"kind": "route", "doi": doi, "prefix": prefix, "status": "host_alias",
+                  "owner": owner})
     kind = route.get("kind")
     # Layer 1 — API/OA/TDM (no proxy, no CF, no login). Works out of the box. It runs
     # before the browser exists: it needs none, and its envelope decides whether the
@@ -2256,6 +2475,22 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
     restore_session(ctx)
     page = ctx.new_page()
     _mark("new_page OK")
+
+    def done(reason: str) -> str:
+        """A route finished. Content-check the file (a wrong article is a rejection, not a
+        success — issue #6) and name a bot wall for what it is (issue #4)."""
+        if reason == "ok":
+            if not _content_check(out, title, doi):
+                return "fail"
+            _drop_stale_partial(out)
+            return "ok"
+        if reason == "fail" and _LAST_WALL:
+            print(f"[fetch] every attempt ended at a bot wall ({_LAST_WALL}) — that is the "
+                  f"wall, not the paper: exit 7, retry later or finish by hand."
+                  f"{_sfx_hint(doi)}", file=sys.stderr)
+            return "blocked"
+        return reason
+
     try:
         # Layer 1½ — the direct route: the article is on the publisher's site for free, a
         # script just cannot get past the wall. A real browser can, and it needs no library.
@@ -2263,9 +2498,7 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
             print(f"[direct] {'; '.join(direct_why)} → real browser straight to the publisher "
                   f"(no proxy, no login)", file=sys.stderr)
             if _direct_pdf(page, doi, out) == "pdf":
-                _content_check(out, title)
-                _drop_stale_partial(out)
-                return "ok"
+                return done("ok")
             print("[direct] no PDF that way → institutional route next", file=sys.stderr)
         if not ensure_login(page):
             print("[fetch] LOGIN FAILED — this is an authentication problem, NOT evidence "
@@ -2323,9 +2556,13 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
                 pdf_from_landing=route.get("pdf_from_landing"))
         elif kind == "tpl":
             # _proxy_pdf returns the _classify status; _tpl_verdict decides whether it is
-            # worth a fresh-login retry ("auth") or final ("fail").
-            attempt = lambda: _tpl_verdict(_proxy_pdf(page, doi, out, allow_nav=False),
-                                           sub, covered, suspect_unsub, doi)
+            # worth a fresh-login retry ("auth") or final ("fail"). The raw status is kept:
+            # a bot wall on the headless request path gets the headful-nav retry below.
+            tpl_last: dict = {}
+
+            def attempt():
+                tpl_last["status"] = _proxy_pdf(page, doi, out, allow_nav=False)
+                return _tpl_verdict(tpl_last["status"], sub, covered, suspect_unsub, doi)
         else:
             _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "n/a",
                   "status": "no_route", "subscribed": sub})
@@ -2335,27 +2572,50 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
                 print("[fetch] ⚠ but holdings says SUBSCRIBED → worth adding a route (first "
                       "check the 'no route, reason established' list at the bottom of ROUTES "
                       "— it may be a known library-side proxy issue)", file=sys.stderr)
+            if _LAST_WALL:     # the direct route ran and a wall was its last word
+                print(f"[fetch] …and the direct route ended at a bot wall ({_LAST_WALL}) → "
+                      f"exit 7 (blocked), not 6: retry later before adding anything",
+                      file=sys.stderr)
+                return "blocked"
             return "no_route"
 
+        _LAST_WALL = None          # only THIS route's final word decides fail vs blocked
         st = attempt()
         if st == "pdf":
-            _content_check(out, title)
-            _drop_stale_partial(out)
-            return "ok"
+            return done("ok")
         if st == "auth":
             print("[fetch] auth expired → fresh login (refreshes proxy authorization), "
                   "then one retry", file=sys.stderr)
             if login(page):
                 if attempt() == "pdf":
-                    _content_check(out, title)
-                    _drop_stale_partial(out)
-                    return "ok"
+                    return done("ok")
             else:
                 print("[fetch] re-login failed → authentication problem, not a missing "
                       "route", file=sys.stderr)
                 return "auth"
+        if kind == "tpl" and tpl_last.get("status") in ("js_challenge", "cf_challenge", "cf_block"):
+            # Issue #4: the wall answered the automation profile's request path, not the
+            # entitlement (Springer via proxy: request.get → Client Challenge ×2; a real
+            # navigation + in-page fetch → the PDF). Retry once as a real headful navigation.
+            print(f"[fetch] {tpl_last['status']} on the headless request path → one retry as "
+                  f"a real page navigation (headful) before concluding anything",
+                  file=sys.stderr)
+            if not needs_headful:
+                ctx.close()
+                ctx = _new_context(pw, headless=False)
+                restore_session(ctx)
+                page = ctx.new_page()
+            _LAST_WALL = None
+            st2 = _proxy_nav_pdf(page, doi, out, route)
+            v2 = _tpl_verdict(st2, sub, covered, suspect_unsub, doi)
+            if v2 == "auth" and login(page):
+                _LAST_WALL = None
+                st2 = _proxy_nav_pdf(page, doi, out, route)
+                v2 = _tpl_verdict(st2, sub, covered, suspect_unsub, doi)
+            if v2 == "pdf":
+                return done("ok")
         print(f"[fetch] {kind} route could not fetch {doi}.{_sfx_hint(doi)}", file=sys.stderr)
-        return "fail"
+        return done("fail")
     finally:
         ctx.close()
 
@@ -2527,9 +2787,10 @@ def main(argv):
             with sync_playwright() as pw:
                 _mark("driver up")
                 if cmd == "fetch":
-                    # 0 ok · 2 route ran but came back empty · 3 auth · 6 no route
-                    return {"ok": 0, "fail": 2, "auth": 3,
-                            "no_route": 6}[run_fetch(pw, argv[1], Path(argv[2]), title,
+                    # 0 ok · 2 route ran but came back empty · 3 auth · 6 no route ·
+                    # 7 every attempt ended at a bot wall (the wall, not the paper)
+                    return {"ok": 0, "fail": 2, "auth": 3, "no_route": 6,
+                            "blocked": 7}[run_fetch(pw, argv[1], Path(argv[2]), title,
                                                      skip_layer1=skip_layer1,
                                                      force_direct=force_direct)]
 

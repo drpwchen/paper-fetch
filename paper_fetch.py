@@ -14,7 +14,8 @@
 Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用法錯誤 · 2=自動路線全敗
 JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
                 partial_path?, reject_reason?, oa_claimed?, free_at_publisher?, blocked_by?[],
-                verify?, verify_detail?, volume_path?, extracted_pages?, elapsed_s}
+                verify?, verify_detail?, volume_path?, extracted_pages?,
+                rejected_path?, rejected_route?, elapsed_s}
 `blocked_by` 列出被 bot 牆（js_challenge / recaptcha / cf_*）擋掉的候選 URL——有它就代表
 全文在牆後面，下一步是 layer 2 的真瀏覽器，不是「無全文」。`free_at_publisher` 是 PubMed
 的 free full text 旗標（Unpaywall 對「出版社自己免費開放」的文章常記 closed）；它和
@@ -26,7 +27,9 @@ Elsevier TDM 另看 `X-ELS-Status` 回應 header——未授權的 DOI 會回 HT
 ==給了 --title 才有第二層（內容層）驗證==：位元組層分不出「這篇文章」與「這篇文章所在的
 那一本」。會議摘要常掛增刊的 DOI，於是 Unpaywall／TDM／機構 proxy 三條路都會誠實地回整本
 ——一個 563 頁的會議摘要集完全合乎 `%PDF-` ＋大小檢查（2026-08，一批 49 篇裡 20% 中招）。
-細節與判準見 `pdf_verify.py`。
+也分不出「這篇」與「聚合站掛錯在這個 DOI 下的別篇」：驗證 `title_absent` 的檔案自 1.5.6 起
+不留在要求的檔名下（改存 `<stem>.rejected.pdf`、envelope `rejected_path`），階梯繼續走，
+全敗仍 exit 2（issue #6）。細節與判準見 `pdf_verify.py`。
 
 路線（依 DOI 前綴自動選，失敗逐階 fallback，最後印機構 SFX 連結）:
     10.1016            → Elsevier TDM Article Retrieval API   (key: ELSEVIER_TDM_KEY)
@@ -646,8 +649,15 @@ def content_check(pdf: bytes, title, out):
     """第二層驗證：這份 PDF 是不是「那一篇」。沒給 title 就回空 dict（不做）。
 
     整本增刊（volume_like）會就地切出該篇，==整本保留成 <stem>_volume.pdf 不刪==：
-    它是複查「切的那頁對不對」唯一的依據。title_absent／no_text 不擋收件（掃描版式、標題
-    在圖片裡都會這樣），但一定要留在 envelope 裡讓呼叫端看見——拿錯文件比缺全文更糟。"""
+    它是複查「切的那頁對不對」唯一的依據。
+
+    title_absent（抽得出文字、前幾頁卻沒有標題、又不是整本）自 1.5.6 起==是退件==
+    （issue #6）：Unpaywall 把另一位 Huang 2009 的 OSTI 預印本掛在這個 DOI 下，40 頁、
+    完全合法的 PDF 以要求的檔名落地、報成功，批次呼叫端只看檔案存不存在就收下了——這正是
+    pdf_verify 要擋的事。退件改存 `<stem>.rejected.pdf`（留給人看是什麼：別篇、勘誤、摘要頁）、
+    階梯繼續往下走（此例 ClinicalKey 路線自己就抓得到對的）。掃描版式／標題在圖裡的
+    真陽性確實存在，但比「抓到別篇」少得多，而且檔案還在，改個名就回來。
+    no_text 沒東西可比，維持只警告不擋。"""
     if not title:
         return {}
     try:
@@ -661,6 +671,17 @@ def content_check(pdf: bytes, title, out):
         print(f"  ✓ 內容驗證：{res['detail']}")
         return info
     print(f"  ⚠ 內容驗證：{res['verdict']} — {res['detail']}")
+    if res["verdict"] == "title_absent":
+        info["rejected"] = True
+        if out:
+            rej = _rejected_path(out)
+            out.replace(rej)
+            info["rejected_path"] = str(rej)
+            print(f"  ✗ 是 PDF，但不是這篇（前幾頁沒有標題）→ 移到 {rej.name}，不算成功；"
+                  "續走下一路線。開檔看一眼是什麼；確定就是這篇再改名回來。")
+        else:
+            print("  ✗ 是 PDF，但不是這篇（前幾頁沒有標題）→ 不算成功；續走下一路線。")
+        return info
     if res["verdict"] == "volume_like" and out:
         cut = pdf_verify.extract(out, title)
         if cut["extracted"]:
@@ -675,16 +696,23 @@ def content_check(pdf: bytes, title, out):
     return info
 
 
+def _rejected_path(out: pathlib.Path) -> pathlib.Path:
+    """`<stem>.rejected.pdf`：合法 PDF、但驗證說不是這篇（issue #6）。"""
+    return out.with_name(out.stem + ".rejected.pdf")
+
+
 def run_ladder(doi, out, title=None):
     """Walk the route ladder. Returns an envelope dict (also the --json payload).
 
     Exit-code contract — same table as library_session.py so orchestrators need one rule:
-      0 = valid PDF obtained (saved if an output path was given)
+      0 = valid PDF obtained (saved if an output path was given) — and, with --title,
+          verified to be THIS article (a title_absent file is `<stem>.rejected.pdf`, not 0)
       1 = usage error
       2 = every automatic route exhausted — envelope carries the resolver link
     """
     started = time.time()
     tried = []
+    title_reject = None   # (route, info) of a PDF that verified as NOT this article
     for route in routes_for(doi):
         name = route.__name__.removeprefix("route_")
         print(f"→ 試 {name}")
@@ -695,11 +723,20 @@ def run_ladder(doi, out, title=None):
             if out:
                 out.write_bytes(pdf)
                 path = str(out)
+            checked = content_check(pdf, title, out)
+            if checked.get("rejected"):
+                # A wrong article under the requested name reads as success to every batch
+                # caller. Keep walking — the next rung may hold the real one (issue #6).
+                title_reject = (name, checked)
+                continue
+            if out:
                 print(f"✓ PDF 已存 → {out} ({len(pdf)} bytes)")
                 print("  下一步：把此 PDF 拖進對應 Zotero item，ZotMoov 會自動搬到 linked-files 資料夾並轉 linked。")
+                if title_reject and title_reject[1].get("rejected_path"):
+                    with contextlib.suppress(OSError):    # superseded by the verified article
+                        pathlib.Path(title_reject[1]["rejected_path"]).unlink()
             else:
                 print(f"✓ 抓到有效 PDF（{len(pdf)} bytes）；未指定輸出檔，未存。")
-            checked = content_check(pdf, title, out)
             env = {"schema": 1, "doi": doi, "ok": True, "route": name,
                    "tried": tried, "bytes": len(pdf),
                    "sha256": hashlib.sha256(pdf).hexdigest(), "path": path,
@@ -713,6 +750,15 @@ def run_ladder(doi, out, title=None):
     # 全部失敗 → 機構 SFX 連結
     resolver = SFX_BASE.format(doi=doi) if SFX_BASE else None
     partial_path = reject_reason = None
+    title_rej: dict = {}
+    if title_reject:
+        rname, info = title_reject
+        title_rej = {"verify": info["verify"], "verify_detail": info["verify_detail"],
+                    "rejected_route": rname, "rejected_path": info.get("rejected_path")}
+        print(f"\n✗ {rname} 路線給了一份 PDF，但內容驗證說不是這篇（{info['verify_detail']}）"
+              + (f"，留在 {info['rejected_path']}" if info.get("rejected_path") else "") + "。")
+        print("  拿錯文件比缺全文更糟——不算成功。多半是 OA 聚合站把別篇掛在這個 DOI 下"
+              "（Unpaywall/OSTI/機構典藏），機構路線常能抓到對的：library_session.py fetch")
     if _LAST_REJECT:
         rejected, reject_reason = _LAST_REJECT
         if out:
@@ -752,6 +798,7 @@ def run_ladder(doi, out, title=None):
             "partial_path": partial_path, "reject_reason": reject_reason,
             "oa_claimed": _OA_CLAIMED, "free_at_publisher": _FREE_AT_PUBLISHER,
             "blocked_by": [{"kind": k, "url": u} for k, u in _BLOCKED],
+            **title_rej,
             "elapsed_s": round(time.time() - started, 1)}
 
 

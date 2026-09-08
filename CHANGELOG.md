@@ -5,6 +5,58 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.6] — 2026-09-08
+
+Three issues filed from one afternoon of real fetches (#4, #5, #6). Each one was the tool
+giving a confident wrong verdict — "no full text", "no route", "success" — where the honest
+answer was "a wall", "a moved journal", "the wrong file".
+
+### Fixed
+- **#6 — a wrong article was written under the requested name and reported as success.**
+  `--title` given, Elsevier TDM not entitled (first page only), the ladder fell through to the
+  OA aggregators, and Semantic Scholar / Unpaywall pointed `10.1016/j.ultrasmedbio.2009.02.006`
+  at an OSTI preprint by a *different* Huang (breast ultrasound tomography, 40 pages). The file
+  landed as `Huang2009.pdf`, `pdf_verify` said `title_absent 10%`, the run said `✓` and exited
+  `0`. `title_absent` was documented as "suspicious, does not block" (scanned layouts); in
+  practice with a title it is far more often "wrong article". Now: the file is moved to
+  `<stem>.rejected.pdf`, the ladder continues (the ClinicalKey route then fetched the real
+  article, `match 100%`, and the reject was cleaned up), a run that ends with only a reject is
+  non-zero, and the envelope carries `rejected_path` / `rejected_route`. `library_session`'s
+  own `_content_check` does the same for the proxy routes. `no_text` stays a warning.
+- **#5 — `10.4187` (Respiratory Care) → exit 6 `no_route`.** The journal left HighWire for
+  Sage in 2025; doi.org now 302s to `journals.sagepub.com`. Added as a Sage tpl prefix.
+  Generalised: **an unknown prefix resolves `doi.org` once** (`_route_by_host`, Location
+  headers only, no browser, no proxy) and, when the landing host belongs to a listed route,
+  uses that route under the new prefix (logged `host_alias`). Liebert `10.1089` — bought by
+  Sage — now works the same way without an entry. Verified: `10.4187/respcare.07002` runs the
+  Sage route and ends `reader_html` (「access options」— the library does not license it at
+  Sage), exit `2`. That is the right answer; `6` was not.
+- **#4 — Springer via proxy: `js_challenge` on a subscribed article was exit `2`.**
+  `request.get` on the proxied `/content/pdf/…` URL gets Fastly's "Client Challenge" twice
+  (primary and alt path). Now the tpl route **retries once as a real page navigation** to the
+  article page (`landing` in ROUTES; the proxied doi.org resolver otherwise) with the PDF
+  fetched from inside the page (`_proxy_nav_pdf`, the direct route's mechanics behind the
+  proxy, including the per-subdomain login bounce). And a wall that is the last word — from
+  any route, after any retry — is a new reason `blocked` → **exit `7`**, printed as such, so
+  batch callers stop logging it as "no full text".
+  What the retry showed on `10.1007/s00455-021-10310-7`: the challenge's `script.js` answers
+  **HTTP 400** (from Fastly, `fastly-trace-id`) to patchright's Chromium *and* to the real
+  Google Chrome binary launched under CDP, headful, same profile cookies — while the user's own
+  logged-in Chrome on the same proxied URL renders the article and an in-page `fetch()` returns
+  the 1.6 MB PDF, `match 100%`. So the retry is kept (it clears walls that only block
+  `request.get`), but for this wall the finish is the user's own browser: the ClinicalKey-only
+  WebBridge fallback was generalised into a publisher-agnostic one for tpl routes (lives with
+  the user's deployment — it drives their browser through a local daemon — not in this repo).
+
+### Changed
+- Exit-code table gains `7` (blocked). `2` narrows again: it no longer covers "a bot wall
+  answered every attempt". README / AGENTS.md / docs/operations.md / SKILL.md updated.
+- `_content_check` returns a bool; `run_fetch` routes every success through one `done()`
+  so the verify-reject and the wall-naming apply to direct, tpl, meta, lww and ck alike.
+- `_drop_stale_partial` also removes `<stem>.rejected.pdf` once a verified article lands.
+- ROUTES entries may carry `landing` (article page template on the same host) for the
+  headful-nav retry; Springer/BMC and Sage have one.
+
 ## [1.5.5] — 2026-09-06
 
 Two PubMed "free full text" articles came back as unobtainable: *Annals* GRADE Guidance 42
