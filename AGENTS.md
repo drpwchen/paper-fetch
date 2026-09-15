@@ -145,6 +145,8 @@ once for an unknown prefix and matches the landing host against the routes befor
   and systematic downloading gets the institution's whole IP range blocked. Batch patterns are in
   [docs/operations.md](docs/operations.md).
 - Never wrap the script in an external `timeout` — it has its own watchdog (`PAPERFETCH_TIMEOUT_S`).
+- **The first `library_session.py` call of a session may hit the 240 s watchdog** (browser cold
+  start) and exit `5`. Rerun once before reading anything into it — it says nothing about the paper.
 - **The same failure twice in a row means stop, not retry.** Rapid repeated attempts turn a
   temporary block (login gate, Cloudflare, Ovid E3 seat limit) into a longer one — worst case
   against the institution's shared IP. Tell the user to wait 30–60 minutes; triage table in
@@ -170,3 +172,28 @@ The docstrings in `library_session.py` describe the full technique (two-phase he
 Cloudflare handling, the dots→dashes proxy host rewrite, session-cookie persistence, the
 `citation_pdf_url` route, and the LWW/Ovid signed-URL + Referer chain). `holdings.py`'s docstring
 explains the entitlement model. They are written to teach the method, not just to run.
+
+## Maintainer notes (the author's own deployment — other users can ignore this section)
+
+- **Two copies.** This public repo is the source of truth for code and docs. A **live** copy runs as
+  the author's local Claude skill (`~/.claude/skills/paper-fetch/`, real `config.yaml`, real
+  `holdings.sqlite`). Every fix lands here first, then is synced to live — back live up to
+  `Documents/Projects/_holding/paper-fetch-live-pre-<ver>-<date>/` before overwriting. Files that
+  exist only in live and must never be copied here: `webbridge_fallback.py` /
+  `ck_webbridge_fallback.py` (they drive the author's own browser bridge) and `scrape_holdings.py`
+  (the public repo ships the holdings *schema*, not a scraper — see docs/holdings.md). The former
+  private institution-specific fork is retired (2026-08-08); do not revive it.
+- `config.yaml` in this checkout is a **test config with fake `example.edu` endpoints** (gitignored),
+  kept only so regression runs work. If a route "fails" here, check which config you are on first.
+- **Release ritual**: CHANGELOG entry → commit explicit paths (never `git add -A`) → `git tag vX.Y.Z`
+  → GitHub release → reply to and close the issues it fixes → sync live. Docs-only changes (README,
+  this file, docs/) ride the next release tag; they are not tagged on their own.
+- **Reviewing an external PR**: run a diff harness on master vs the PR branch — secret-store
+  fingerprint (sha256 of an existing secret), set/get round-trip, miss message, `_pid_alive`,
+  single-instance lock (stale takeover / live → exit 4), OA ladder end to end. Output identical
+  except renamed APIs and wording = no Windows regression. The platform the contributor does not
+  have is the half we must test ourselves. Rebase-merge to keep the author.
+- Markdown here renders on GitHub: use **bold**, never `==mark==`.
+- Institution-specific facts (subscribed platforms, broken proxy subdomains that need a library
+  ticket, the ClinicalKey institution-modal value) are deliberately **not** here — they live in the
+  author's private notes and the live `config.yaml`.
