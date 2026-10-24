@@ -338,7 +338,7 @@ def draft_for_envelope(doi: str, env: dict | None = None) -> dict:
 def reddit_get(st: dict, url: str, headers: dict | None = None) -> requests.Response:
     now = time.time()
     if st.get("backoff_until", 0) > now:
-        raise RateLimited(f"backoff until {_dt.datetime.fromtimestamp(st['backoff_until']):%H:%M}")
+        raise RateLimited(f"backoff until {_dt.datetime.fromtimestamp(st['backoff_until']):%H:%M:%S}")
     wait = st.get("reddit_next_ok", 0) - now
     if wait > _R["max_wait_s"]:
         raise RateLimited(f"next Reddit slot in {wait:.0f}s")
