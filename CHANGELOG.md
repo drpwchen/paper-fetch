@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] — 2026-10-24
+
+### Added
+- `reddit.stale_days` (default 21): a request with no reply at all after that long is closed
+  by `poll` (event `stale`), so polling ends instead of running forever.
+- `reddit.on_idle` / `reddit.on_active`: commands run when `poll` finds nothing open / when
+  `track` opens a request — e.g. disable and re-enable the scheduled job.
+
 ## [1.6.0] — 2026-10-24
 
 When every route has failed, the last finishes are interlibrary loan, the author, or asking

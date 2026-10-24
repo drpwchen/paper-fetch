@@ -294,6 +294,11 @@ r/Scholar is your call. If you make it, this script does the bookkeeping — **i
   `command` sinks (config `reddit.notify`). Events carry title, DOI, status and comment count —
   never comment text. `notify-test` sends one test event through every sink.
 
+Requests nobody answers within `reddit.stale_days` (default 21) are closed, so polling
+ends. `reddit.on_idle` / `on_active` run a command when nothing is left to watch / when a
+request opens — point them at your scheduler to switch the job off and on (example in
+`config.example.yaml`).
+
 Scheduling `poll` every 30 minutes — Windows:
 `schtasks /Create /SC MINUTE /MO 30 /TN paper-fetch-reddit-poll /TR "python C:\path\to\reddit_request.py poll"`;
 cron: `*/30 * * * * cd /path/to/paper-fetch && python reddit_request.py poll >> poll.log 2>&1`.

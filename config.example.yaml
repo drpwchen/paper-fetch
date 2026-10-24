@@ -114,6 +114,11 @@ rate:
 #  inbox_feed_secret: ""  # secret-store NAME holding your private inbox RSS URL
 #                         # (reddit.com/prefs/feeds). Chat messages are in no feed at all.
 #  max_wait_s: 180      # longest in-process wait for Reddit's rate budget before exiting 7
+#  stale_days: 21       # a request with no reply at all after this long is closed (0 = never)
+#  # Let the scheduler sleep while nothing is being watched: `poll` runs on_idle when no
+#  # request is open; `track` runs on_active when one opens. Windows Task Scheduler example:
+#  on_idle:   ["schtasks", "/Change", "/TN", "paper-fetch-reddit-poll", "/DISABLE"]
+#  on_active: ["schtasks", "/Change", "/TN", "paper-fetch-reddit-poll", "/ENABLE"]
 #  # Every event is appended to <state_dir>/events.jsonl. Extra sinks, any combination:
 #  notify:
 #    - type: ntfy

@@ -51,7 +51,9 @@ Reddit chat is not in any RSS feed — a fulfiller who answers by chat is invisi
 add your private inbox feed (reddit.com/prefs/feeds → "your inbox", store the full URL in
 the secret store and name it in `reddit.inbox_feed_secret`); even then chat stays dark.
 
-State machine: drafted → posted → replied → fulfilled → verified → closed (`close` any time).
+State machine: drafted → posted → replied → fulfilled → verified → closed (`close` any time;
+automatic after `stale_days` with no reply). `on_idle` / `on_active` hooks let the scheduler
+sleep while nothing is open.
 The poster's own "thanks solution verified" comment moves a request to `verified` too.
 `status` prints the tracking table (posted / replies / link offered / status / thanked);
 `<state_dir>/status.md` holds the same table and is rewritten on every state change.
@@ -84,6 +86,9 @@ _R = {
     "ignore_authors": ["AutoModerator"],
     "inbox_feed_secret": "",
     "max_wait_s": 180,
+    "stale_days": 21,       # no reply at all after this long → closed (stops polling it)
+    "on_active": [],        # argv run when a request starts being tracked (e.g. enable the scheduler)
+    "on_idle": [],          # argv run when poll finds nothing left to watch (e.g. disable it)
     "notify": [],
     **(CFG.get("reddit") or {}),
 }
@@ -170,7 +175,8 @@ def emit(event: str, rec: dict | None = None, *, notify: bool = True, **extra) -
 
 def _notify_ntfy(sink: dict, ev: dict) -> None:
     head = {"test": "test event", "replied": "new reply", "fulfilled": "reply with a link",
-            "verified": "PDF verified", "inbox": "inbox message"}.get(ev["event"], ev["event"])
+            "verified": "PDF verified", "inbox": "inbox message",
+            "stale": "closed — no reply"}.get(ev["event"], ev["event"])
     msg = "\n".join(x for x in (ev.get("title"), ev.get("doi") and f"DOI {ev['doi']}",
                                 f"status {ev.get('status')} · {ev.get('comments', 0)} comment(s)",
                                 ev.get("url")) if x)
@@ -467,6 +473,8 @@ def cmd_track(a) -> int:
         d["status"], d["post_id"] = "posted", pid
     save_state(st)
     emit("tracked", rec, notify=False)
+    if rec["status"] in OPEN_STATES:
+        _hook("on_active")
     print(f"tracking {pid} ({rec['status']}): {title or '(title from first poll)'}")
     return 0
 
@@ -509,9 +517,47 @@ def _ingest(st: dict, rec: dict, entries: list[dict]) -> list[str]:
     return events
 
 
+def _hook(name: str) -> None:
+    argv = _R.get(name) or []
+    if not argv:
+        return
+    try:
+        subprocess.run(argv, capture_output=True, timeout=30, check=True)
+    except Exception as e:                  # a scheduler hiccup must not fail the command
+        print(f"[{name}] {argv[0]} failed: {type(e).__name__}", file=sys.stderr)
+
+
+def _close_stale(st: dict) -> None:
+    """A request nobody has answered in `stale_days` is not coming back; stop polling it."""
+    limit = _R.get("stale_days") or 0
+    if not limit:
+        return
+    now = _dt.datetime.now(_dt.timezone.utc)
+    for rec in st["posts"].values():
+        if rec["status"] != "posted":
+            continue
+        when = rec.get("posted_at") or rec.get("created", "")
+        try:
+            t = _dt.datetime.fromisoformat(when.replace(" ", "T"))
+        except ValueError:
+            continue
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=_dt.timezone.utc)
+        if (now - t).days >= limit:
+            _advance(rec, "closed")
+            rec["closed_reason"] = f"no reply in {limit} days"
+            emit("stale", rec)
+
+
 def cmd_poll(a) -> int:
     st = load_state()
+    _close_stale(st)
+    save_state(st)
     todo = [r for r in st["posts"].values() if r["status"] in OPEN_STATES]
+    if not todo:
+        print("nothing open to watch" + (" — running on_idle" if _R.get("on_idle") else ""))
+        _hook("on_idle")
+        return 0
     report = []
     try:
         if _R["inbox_feed_secret"]:
