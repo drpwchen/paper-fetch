@@ -15,7 +15,9 @@ Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用
 JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
                 partial_path?, reject_reason?, oa_claimed?, free_at_publisher?, blocked_by?[],
                 verify?, verify_detail?, volume_path?, extracted_pages?,
-                rejected_path?, rejected_route?, elapsed_s}
+                rejected_path?, rejected_route?, reddit_draft?, elapsed_s}
+`reddit_draft`（只在失敗時）：r/Scholar 求文草稿（reddit_request.py），==只是草稿、不會發==；
+OA／bot 牆／PubMed free 的文章給 {"refused": …}——那些該走 layer 2 的瀏覽器，不是去跟人要。
 `blocked_by` 列出被 bot 牆（js_challenge / recaptcha / cf_*）擋掉的候選 URL——有它就代表
 全文在牆後面，下一步是 layer 2 的真瀏覽器，不是「無全文」。`free_at_publisher` 是 PubMed
 的 free full text 旗標（Unpaywall 對「出版社自己免費開放」的文章常記 closed）；它和
@@ -833,6 +835,14 @@ def main():
         # diagnostic line the routes print is rerouted to stderr.
         with contextlib.redirect_stdout(sys.stderr):
             env = run_ladder(doi, out, title)
+            if not env["ok"]:
+                # The last-resort finish, drafted but never posted (reddit_request.py):
+                # refused when the article is OA or walled-but-free — those go to layer 2.
+                try:
+                    import reddit_request
+                    env["reddit_draft"] = reddit_request.draft_for_envelope(doi, env)
+                except Exception as e:
+                    env["reddit_draft"] = {"refused": f"error: {type(e).__name__}"}
         print(json.dumps(env, ensure_ascii=False))
     else:
         env = run_ladder(doi, out, title)

@@ -102,3 +102,25 @@ rate:
 # stay unset.
 #clinicalkey:
 #  institution_match: "IP_"
+
+# --- r/Scholar requests (reddit_request.py) — the last resort after every route failed ---
+# Drafts a request in the subreddit's format, tracks the thread, notifies on replies.
+# It never posts: you paste the draft yourself. All keys optional.
+#reddit:
+#  subreddit: "Scholar"
+#  state_dir: ""        # default ~/.paper-fetch/reddit (state.json, events.jsonl) — outside the repo
+#  body_note: "Needed for a systematic review. Thank you!"
+#  ignore_authors: ["AutoModerator"]   # the poster is ignored automatically
+#  inbox_feed_secret: ""  # secret-store NAME holding your private inbox RSS URL
+#                         # (reddit.com/prefs/feeds). Chat messages are in no feed at all.
+#  max_wait_s: 180      # longest in-process wait for Reddit's rate budget before exiting 7
+#  # Every event is appended to <state_dir>/events.jsonl. Extra sinks, any combination:
+#  notify:
+#    - type: ntfy
+#      server: "https://ntfy.sh"
+#      topic: "your-private-topic"
+#      token_secret: ""   # secret-store NAME of an access token; blank for an open topic
+#    - type: webhook      # POSTs the event JSON
+#      url: "https://example.org/hook"
+#    - type: command      # runs argv with the event JSON on stdin
+#      argv: ["python", "my_notifier.py"]

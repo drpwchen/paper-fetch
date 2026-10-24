@@ -5,6 +5,36 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-10-24
+
+When every route has failed, the last finishes are interlibrary loan, the author, or asking
+on r/Scholar. This release does the bookkeeping for the last one — and refuses it where the
+honest answer is "the article is free, open it in a browser".
+
+### Added
+- **`reddit_request.py`** — `draft` (the subreddit's pinned format, author included:
+  `[Article] <Title> + <Author> et al. (<Journal>, <Year>)`, body with citation, DOI, doi.org
+  link and PMID; PubMed metadata, Crossref fallback), `dedupe` (r/Scholar search for the DOI),
+  `track`, `poll`, `verify` (`pdf_verify` + optional `--registry`), `close`, `status`,
+  `notify-test`. **It never posts.** State lives outside the repo (`~/.paper-fetch/reddit/`).
+- **OA gate**: `draft` exits `8` and prints the OA location when Unpaywall says `is_oa` — a
+  Karger gold-OA article blocked to scripts had been logged "no full-text route" and then
+  requested from strangers. Without a working Unpaywall check it refuses unless
+  `--skip-oa-check`.
+- **`paper_fetch.py --json`**: a failed envelope carries `reddit_draft` — the draft, or
+  `{"refused": …}` for OA / bot-walled / PubMed-free articles (layer 2's real browser first).
+- **Polling within Reddit's unauthenticated budget**: one GET answers
+  `x-ratelimit-remaining: 0, x-ratelimit-reset: ~56` — about one request a minute. Every
+  Reddit request goes through one gate that waits out that budget (persisted, so a second
+  process waits too); a 429 records a backoff and exits `7`, never a retry loop. A comment by
+  someone other than the poster/AutoModerator → `replied`; with an off-Reddit link →
+  `fulfilled` (candidate; links are never downloaded). Reddit chat is in no feed.
+- **Tracking table**: `status` (and `status.md` beside the state file, rewritten on every
+  change) lists each request — posted, replies, link offered, status, thanked. The poster's own
+  `thanks solution verified` comment, seen by `poll`, marks a request `verified`.
+- **Notification sinks** (`reddit.notify`): `events.jsonl` always, plus `ntfy`, `webhook`,
+  `command`. Events carry title, DOI, status, comment count — never comment text.
+
 ## [1.5.6] — 2026-09-08
 
 Three issues filed from one afternoon of real fetches (#4, #5, #6). Each one was the tool

@@ -140,6 +140,12 @@ once for an unknown prefix and matches the landing host against the routes befor
   article is in there and cuts it out of the volume (the volume is kept alongside). Handing a
   whole volume to a downstream reader is worse than handing it nothing: it produces a
   confident answer about the wrong study.
+- **`reddit_draft` in a failed envelope is a draft, never a post.** Posting to r/Scholar is the
+  user's own act — show them the draft; do not post on their behalf unless they explicitly ask
+  for that specific post. `reddit_request.py draft` exits `8` for an OA article: fetch it in a
+  real browser (`library_session.py fetch --direct`), do not ask strangers for it. Never pass
+  PDFs obtained through the library or a TDM key on to other people — that breaks the licence
+  and gets the institution's IP range blocked. `poll` exit `7` = Reddit rate limit: wait.
 - The proxy layer is **strictly serial** with a courtesy delay. Never parallelise it: the browser
   profile is an exclusive resource (parallel callers deadlock, then get logged as missing papers),
   and systematic downloading gets the institution's whole IP range blocked. Batch patterns are in
