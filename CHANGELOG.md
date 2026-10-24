@@ -31,7 +31,8 @@ honest answer is "the article is free, open it in a browser".
   `fulfilled` (candidate; links are never downloaded). Reddit chat is in no feed.
 - **Tracking table**: `status` (and `status.md` beside the state file, rewritten on every
   change) lists each request — posted, replies, link offered, status, thanked. The poster's own
-  `thanks solution verified` comment, seen by `poll`, marks a request `verified`.
+  `thanks solution verified` comment, seen by `poll`, marks a request `verified`;
+  `verify <id> --manual` records a file checked by hand.
 - **Notification sinks** (`reddit.notify`): `events.jsonl` always, plus `ntfy`, `webhook`,
   `command`. Events carry title, DOI, status, comment count — never comment text.
 

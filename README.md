@@ -285,8 +285,8 @@ r/Scholar is your call. If you make it, this script does the bookkeeping — **i
   private inbox feed (`reddit.inbox_feed_secret`) adds comment replies and private messages.
 - **`verify`** runs `pdf_verify` against the article title (optionally `--registry NCT…`) and
   reminds you to reply `thanks solution verified`, which is how the subreddit scores fulfillers.
-  If you checked the file by hand and replied that yourself, the next `poll` sees your comment
-  and marks the request `verified`.
+  If you checked the file by hand, `verify <id> --manual` records that; if you also replied
+  yourself, the next `poll` sees your comment and marks the request `verified` on its own.
 - **`status`** is the tracking table — when each request went out, how many replies, whether a
   link was offered, its status, whether you thanked the fulfiller. `<state_dir>/status.md` holds
   the same table as Markdown and is rewritten on every change (`status --md` / `--json` too).

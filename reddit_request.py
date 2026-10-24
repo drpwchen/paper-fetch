@@ -16,7 +16,7 @@ when you say so* can sit on top of `track` — this repo does not ship one.)
     python reddit_request.py dedupe <DOI>                  # already requested on r/Scholar?
     python reddit_request.py track <post_url> [--doi D] [--record-id R] [--title T]
     python reddit_request.py poll [--json]                 # one pass over tracked threads
-    python reddit_request.py verify <post> <pdf> [--registry NCT…]
+    python reddit_request.py verify <post> <pdf> [--registry NCT…]   # or --manual
     python reddit_request.py close <post>                  # done by hand / give up
     python reddit_request.py status [--json]
     python reddit_request.py notify-test                   # one test event to every sink
@@ -576,6 +576,15 @@ def cmd_verify(a) -> int:
     rec = st["posts"].get(post_id(a.post))
     if not rec:
         sys.exit(f"{a.post} is not tracked")
+    if a.manual:                        # the user opened the file and says it is the article
+        _advance(rec, "verified")
+        rec["verified_pdf"] = "manual"
+        save_state(st)
+        emit("verified", rec, notify=False)
+        print(f"{rec['id']} marked verified by hand")
+        return 0
+    if not a.pdf:
+        sys.exit("give the PDF, or --manual if you checked it yourself")
     if not rec.get("title"):
         sys.exit("no article title on record — re-run track with --title")
     res = pdf_verify.verify(a.pdf, rec["title"])
@@ -688,8 +697,9 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("verify")
     p.add_argument("post")
-    p.add_argument("pdf")
+    p.add_argument("pdf", nargs="?")
     p.add_argument("--registry", help="trial registry id that must appear in the PDF")
+    p.add_argument("--manual", action="store_true", help="you checked the file yourself")
     p = sub.add_parser("close")
     p.add_argument("post")
     p = sub.add_parser("status")
