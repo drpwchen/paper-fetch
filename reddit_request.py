@@ -173,6 +173,22 @@ def emit(event: str, rec: dict | None = None, *, notify: bool = True, **extra) -
             print(f"[notify] {kind} failed: {type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
 
 
+NO_SINK = ("NO NOTIFY SINK CONFIGURED — replies are only written to events.jsonl and nobody "
+           "will be told. Add reddit.notify (ntfy / webhook / command) to config.yaml, then run "
+           "`notify-test`.")
+
+
+def has_sink() -> bool:
+    """True when at least one sink actually reaches a person (`jsonl` is the events file itself)."""
+    return any((s or {}).get("type") not in (None, "jsonl") for s in _R["notify"] or [])
+
+
+def warn_no_sink() -> None:
+    """Shout on stderr: a tracked request with no sink is a request whose answer goes unseen."""
+    if not has_sink():
+        print(f"\n!!! [reddit] {NO_SINK}\n", file=sys.stderr)
+
+
 def _notify_ntfy(sink: dict, ev: dict) -> None:
     head = {"test": "test event", "replied": "new reply", "fulfilled": "reply with a link",
             "verified": "PDF verified", "inbox": "inbox message",
@@ -475,6 +491,7 @@ def cmd_track(a) -> int:
     emit("tracked", rec, notify=False)
     if rec["status"] in OPEN_STATES:
         _hook("on_active")
+        warn_no_sink()
     print(f"tracking {pid} ({rec['status']}): {title or '(title from first poll)'}")
     return 0
 
@@ -558,6 +575,7 @@ def cmd_poll(a) -> int:
         print("nothing open to watch" + (" — running on_idle" if _R.get("on_idle") else ""))
         _hook("on_idle")
         return 0
+    warn_no_sink()
     report = []
     try:
         if _R["inbox_feed_secret"]:
@@ -688,7 +706,8 @@ def status_markdown(st: dict) -> str:
     drafts = [d for d in st["drafts"].values() if d.get("status") == "drafted"]
     tail = ("\nDrafted, not posted: " + ", ".join(d.get("doi") or "?" for d in drafts) + "\n"
             if drafts else "")
-    return f"# r/{_R['subreddit']} requests — {_now()[:16]} UTC\n\n" + head + body + tail
+    warn = "" if has_sink() else f"> ⚠️ **{NO_SINK}**\n\n"
+    return f"# r/{_R['subreddit']} requests — {_now()[:16]} UTC\n\n" + warn + head + body + tail
 
 
 def write_status_md(st: dict) -> None:

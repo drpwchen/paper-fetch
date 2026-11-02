@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `reddit_request.py`: when no `reddit.notify` sink is configured (an empty list, or only
+  `jsonl`), `track` and `poll` print a loud warning on stderr and `status.md` carries it at the
+  top. Before this, a reply to a tracked request was only appended to `events.jsonl` and could
+  sit unseen for days. Tests in `tests/test_reddit_no_sink.py` (no network).
+
 ## [1.6.1] — 2026-10-24
 
 ### Added
