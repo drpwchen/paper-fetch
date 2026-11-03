@@ -57,9 +57,10 @@ rewriting-proxy libraries follow), so an agent/reader can adapt this to any libr
   delay (rate.min_interval_s) is enforced between papers.
 ────────────────────────────────────────────────────────────────────────────────────────
 
-Credentials (store once in a DPAPI CurrentUser store; values never touch chat or config):
-    powershell -File ~/.secrets/secret.ps1 set LIB_USER
-    powershell -File ~/.secrets/secret.ps1 set LIB_PASS
+Credentials (store once in the local secret store; values never touch chat or config):
+    python library_session.py secret set LIB_USER      # prompts; nothing echoed or logged
+    python library_session.py secret set LIB_PASS
+    python library_session.py secret check LIB_USER    # stored? (never prints the value)
 
 CLI:
     python library_session.py check                    # is the stored session valid?
@@ -82,6 +83,7 @@ CLI:
                                                        # whenever layer 1 reports the article
                                                        # free (PubMed) or walled off (bot wall)
                                                        # (env: PAPERFETCH_DIRECT=1)
+    python library_session.py secret set|check <NAME>  # local secret store (see above)
     python library_session.py stats                    # access-log summary / block analysis
     python library_session.py routes                   # per-route scorecard + holdings gaps
 
@@ -433,7 +435,7 @@ SECRETS_BACKEND = _resolve_backend()
 def _store_hint(name: str) -> str:
     """How to store `name` under the active backend — printed on a miss."""
     if SECRETS_BACKEND == "dpapi":
-        return f"powershell -File ~/.secrets/secret.ps1 set {name}"
+        return f"python library_session.py secret set {name}"
     if SECRETS_BACKEND == "keychain":
         # -w LAST so `security` prompts, keeping the value out of shell history and `ps`.
         return f"security add-generic-password -s {KEYCHAIN_SERVICE} -a {name} -U -w"
@@ -2729,6 +2731,42 @@ def print_routes() -> None:
 
 
 # --- CLI ------------------------------------------------------------------
+def secret_cli(args: list[str]) -> int:
+    """`secret set NAME` (prompts, or reads one line from a pipe) · `secret check NAME`.
+
+    The value is never printed, never taken as an argument (shell history, `ps`), and never
+    logged. `check` answers only "stored" / "not stored".
+    """
+    if len(args) != 2 or args[0] not in ("set", "check"):
+        print("usage: library_session.py secret set|check <NAME>", file=sys.stderr)
+        return 1
+    op, name = args
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        print(f"secret name {name!r}: use letters, digits, _ . - only", file=sys.stderr)
+        return 1
+    if op == "check":
+        ok = secret_get_opt(name) is not None
+        print(f"{name}: {'stored' if ok else 'not stored'} (backend {SECRETS_BACKEND})")
+        return 0 if ok else 2
+    if SECRETS_BACKEND not in ("dpapi", "keychain"):
+        print(f"backend {SECRETS_BACKEND!r} cannot store secrets — {_store_hint(name)}",
+              file=sys.stderr)
+        return 1
+    if sys.stdin.isatty():
+        import getpass
+        value = getpass.getpass(f"{name} (input hidden): ")
+    else:
+        value = sys.stdin.readline().rstrip("\r\n")
+    if not value:
+        print("empty value — nothing stored", file=sys.stderr)
+        return 1
+    secret_set(name, value)
+    ok = secret_get_opt(name) == value
+    print(f"{name}: {'stored' if ok else 'NOT stored — see the message above'} "
+          f"(backend {SECRETS_BACKEND})")
+    return 0 if ok else 1
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -2759,6 +2797,8 @@ def main(argv):
         print(__doc__)
         return 1
     cmd = argv[0]
+    if cmd == "secret":
+        return secret_cli(argv[1:])
     if cmd == "stats":
         print_stats()
         return 0

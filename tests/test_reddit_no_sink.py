@@ -37,12 +37,12 @@ def test_no_sink_warns_on_track_poll_and_status(rr_tmp, monkeypatch, capsys, sin
     monkeypatch.setitem(rr._R, "notify", sinks)
     assert not rr.has_sink()
     assert _track() == 0
-    assert "NO NOTIFY SINK CONFIGURED" in capsys.readouterr().err
+    assert "NO WORKING NOTIFY SINK" in capsys.readouterr().err
     assert rr.main(["poll"]) == 0
-    assert "NO NOTIFY SINK CONFIGURED" in capsys.readouterr().err
+    assert "NO WORKING NOTIFY SINK" in capsys.readouterr().err
     md = (rr_tmp / "status.md").read_text(encoding="utf-8")
     first = md.split("\n\n")[1]          # right under the heading, above the table
-    assert "NO NOTIFY SINK CONFIGURED" in first
+    assert "NO WORKING NOTIFY SINK" in first
 
 
 def test_configured_sink_is_quiet(rr_tmp, monkeypatch, capsys):
@@ -50,11 +50,11 @@ def test_configured_sink_is_quiet(rr_tmp, monkeypatch, capsys):
     assert rr.has_sink()
     assert _track() == 0
     assert rr.main(["poll"]) == 0
-    assert "NO NOTIFY SINK" not in capsys.readouterr().err
-    assert "NO NOTIFY SINK" not in (rr_tmp / "status.md").read_text(encoding="utf-8")
+    assert "NO WORKING NOTIFY SINK" not in capsys.readouterr().err
+    assert "NO WORKING NOTIFY SINK" not in (rr_tmp / "status.md").read_text(encoding="utf-8")
 
 
 def test_nothing_open_does_not_warn(rr_tmp, monkeypatch, capsys):
     monkeypatch.setitem(rr._R, "notify", [])
     assert rr.main(["poll"]) == 0
-    assert "NO NOTIFY SINK" not in capsys.readouterr().err
+    assert "NO WORKING NOTIFY SINK" not in capsys.readouterr().err

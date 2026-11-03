@@ -39,7 +39,7 @@ live in a secret store chosen by platform, and `auto` (the default) needs no con
 | `secrets.backend` | Store | Store a value |
 |---|---|---|
 | `auto` | dpapi on Windows, keychain on macOS, env elsewhere | — |
-| `dpapi` | Windows DPAPI (CurrentUser), files under `~/.secrets` | `powershell -File ~/.secrets/secret.ps1 set LIB_USER` |
+| `dpapi` | Windows DPAPI (CurrentUser), files under `~/.secrets` | `python library_session.py secret set LIB_USER` (prompts, input hidden) |
 | `keychain` | macOS login Keychain, service `paper-fetch` | `security add-generic-password -s paper-fetch -a LIB_USER -U -w` (put `-w` last so it prompts — inline, the password lands in shell history and `ps`) |
 | `env` | environment variables of the same name | `export LIB_USER=...` |
 | `none` | nothing is read or written | — |

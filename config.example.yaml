@@ -119,13 +119,32 @@ rate:
 #  # request is open; `track` runs on_active when one opens. Windows Task Scheduler example:
 #  on_idle:   ["schtasks", "/Change", "/TN", "paper-fetch-reddit-poll", "/DISABLE"]
 #  on_active: ["schtasks", "/Change", "/TN", "paper-fetch-reddit-poll", "/ENABLE"]
-#  # Every event is appended to <state_dir>/events.jsonl. Extra sinks, any combination:
+#  # Every event is appended to <state_dir>/events.jsonl — nobody reads that file, so add at
+#  # least one channel below, any combination. Then: python reddit_request.py notify-test
+#  # Secrets are secret-store NAMES (python library_session.py secret set <NAME>), never values.
+#  # Optional on every sink: `name` (label in messages) and `events` (only these:
+#  # replied, fulfilled, verified, stale, inbox).
 #  notify:
 #    - type: ntfy
 #      server: "https://ntfy.sh"
-#      topic: "your-private-topic"
-#      token_secret: ""   # secret-store NAME of an access token; blank for an open topic
-#    - type: webhook      # POSTs the event JSON
-#      url: "https://example.org/hook"
-#    - type: command      # runs argv with the event JSON on stdin
-#      argv: ["python", "my_notifier.py"]
+#      topic: "a-long-random-topic-name"   # open ntfy.sh topics are readable by anyone who guesses
+#      token_secret: ""   # access token NAME; blank for an open topic
+#    - type: discord      # Channel settings → Integrations → Webhooks → Copy Webhook URL
+#      url_secret: "DISCORD_WEBHOOK_URL"
+#      username: "paper-fetch"
+#    - type: telegram     # bot from @BotFather; press Start in your bot, then notify-test
+#      token_secret: "TELEGRAM_BOT_TOKEN"  #   prints the chat_id to put here
+#      chat_id: 123456789
+#    - type: email
+#      host: "smtp.gmail.com"
+#      port: 587
+#      security: starttls # starttls (587) · ssl (465) · none
+#      from: "you@example.org"
+#      to: ["you@example.org"]
+#      user: ""           # defaults to `from`
+#      password_secret: "SMTP_PASSWORD"   # Gmail/Outlook: an app password
+#      events: [fulfilled, stale]
+#    - type: webhook      # POSTs the raw event JSON (Discord/Slack need their own type)
+#      url_secret: "MY_WEBHOOK_URL"
+#    - type: command      # runs argv with the event JSON on stdin; use absolute paths
+#      argv: ["python", "/abs/path/my_notifier.py"]

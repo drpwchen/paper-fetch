@@ -44,8 +44,9 @@ Elsevier TDM 另看 `X-ELS-Status` 回應 header——未授權的 DOI 會回 HT
     仍失敗             → PubMed free full text 旗標 → 出版社落地頁（沒 bot 牆的出版社這裡就拿到）
     全部失敗           → 印機構 SFX 連結，機構登入手動下載
 
-KEY 安全：所有 token 從 PC DPAPI secret store 讀（secret.ps1 get），只放記憶體、塞 header，
-全程不列印、不寫檔。缺 token → 印一行 `secret.ps1 set <NAME>` 指令，不洩漏既有值。
+KEY 安全：所有 token 從本機 secret store 讀（library_session 的 dpapi／keychain／env；
+舊部署的 ~/.secrets/secret.ps1 作 fallback），只放記憶體、塞 header，全程不列印、不寫檔。
+缺 token → 印一行 `python library_session.py secret set <NAME>` 指令，不洩漏既有值。
 機構端點與個人 email 從 config.yaml 讀（見 config.example.yaml），不寫死在原始碼。
 
 PDF 一旦存到磁碟，把它拖進對應的 Zotero item；ZotMoov 會自動搬到你的 linked-files 資料夾並轉 linked file。
@@ -80,7 +81,20 @@ PAPER_RADAR_DB = pathlib.Path(CFG["paper_radar_db"]) if CFG["paper_radar_db"] el
 
 
 def get_secret(name):
-    """從 DPAPI 取一個 secret；失敗回 None。stdout 只被本函式吃掉，不外流。"""
+    """取一個 secret；失敗回 None。值只回傳給呼叫端，不印、不寫檔。
+
+    先走 library_session 的 secret store（README 教使用者存的地方，跨平台）；沒有才退回
+    舊部署的 secret.ps1（公開 repo 不附這支，2026-11-03 前 Windows 使用者因此讀不到 TDM key）。
+    """
+    try:
+        import library_session
+        v = library_session.secret_get_opt(name)
+        if v:
+            return v
+    except Exception:
+        pass
+    if not SECRET_PS1.exists():
+        return None
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-File", str(SECRET_PS1), "get", name],
@@ -208,7 +222,7 @@ def valid_pdf(content: bytes) -> bool:
 def route_elsevier(doi):
     key = get_secret("ELSEVIER_TDM_KEY")
     if not key:
-        print("⚠ 無 ELSEVIER_TDM_KEY → 先存：powershell -File ~/.secrets/secret.ps1 set ELSEVIER_TDM_KEY")
+        print("⚠ 無 ELSEVIER_TDM_KEY → 先存：python library_session.py secret set ELSEVIER_TDM_KEY")
         return None
     headers = {"X-ELS-APIKey": key, "Accept": "application/pdf", "User-Agent": UA}
     insttoken = get_secret("ELSEVIER_INSTTOKEN")  # 選用；校外解付費才需
@@ -252,7 +266,7 @@ def route_wiley(doi):
     token = get_secret("WILEY_TDM_TOKEN")
     if not token:
         print("⚠ 無 WILEY_TDM_TOKEN → 接受 click-through (https://static.wiley.com/tdm/) 後存：")
-        print("   powershell -File ~/.secrets/secret.ps1 set WILEY_TDM_TOKEN")
+        print("   python library_session.py secret set WILEY_TDM_TOKEN")
         return None
     headers = {"Wiley-TDM-Client-Token": token, "Accept": "application/pdf", "User-Agent": UA}
     # TDM v1 端點依 DOI 回 PDF（會 302 到實際 PDF；requests 預設跟隨）
@@ -287,7 +301,7 @@ def route_springer(doi):
             print(f"  Springer API 查詢失敗（改直連）: {e}")
     else:
         print("⚠ 無 SPRINGER_API_KEY（OA 直連通常仍可）→ 需要時存：")
-        print("   powershell -File ~/.secrets/secret.ps1 set SPRINGER_API_KEY")
+        print("   python library_session.py secret set SPRINGER_API_KEY")
     # 直連 OA content/pdf。2026-09-05 起 link.springer.com 對每個腳本請求（含舊 OA 文章、含
     # 先抓落地頁拿 cookie、含 curl_cffi 模仿 Chrome）都回 HTTP 200 + 3 KB「Client Challenge」
     # JS 頁；*.biomedcentral.com 的 /counter/pdf 也 302 回同一面牆。這裡只做一次，認出牆就

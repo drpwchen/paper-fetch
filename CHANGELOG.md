@@ -5,13 +5,44 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0] — 2026-11-03
+
+Notifications that other people can actually set up: three new channels, a test that tells
+you which channel is broken and why, and no more silently unheard replies.
 
 ### Added
-- `reddit_request.py`: when no `reddit.notify` sink is configured (an empty list, or only
-  `jsonl`), `track` and `poll` print a loud warning on stderr and `status.md` carries it at the
-  top. Before this, a reply to a tracked request was only appended to `events.jsonl` and could
-  sit unseen for days. Tests in `tests/test_reddit_no_sink.py` (no network).
+- **Notify channels** `discord` (webhook), `telegram` (bot) and `email` (SMTP, stdlib only),
+  next to `ntfy`, `webhook` and `command`. No new dependencies. Webhook URLs, bot tokens and
+  SMTP passwords are secret-store names (`url_secret`, `token_secret`, `password_secret`);
+  `webhook` takes `url_secret` too.
+- **`events:` per sink** — e.g. email only for `fulfilled` and `stale`.
+- **No working sink → loud warning**: `track` and `poll` print it on stderr and `status.md`
+  carries it at the top. A sink with a missing field or an unstored secret counts as not
+  working. Before this, a reply was only appended to `events.jsonl` and could sit unseen for days.
+- **Failed deliveries are visible**: each failure is appended to `events.jsonl`
+  (`notify_failed`) and the sink is named at the top of `status.md` until it delivers again
+  (`<state_dir>/notify_status.json`).
+- **`library_session.py secret set|check <NAME>`** — store a secret (prompted, input hidden)
+  or check that it is stored, on Windows and macOS. The Windows instructions used to point at
+  a `secret.ps1` script that this repo does not ship.
+- Tests: `tests/` (pytest, no network — local HTTP server, stub SMTP).
+
+### Changed
+- **`notify-test`** now sends through each sink separately and prints `OK` / `FAIL — reason`
+  per sink with a hint (expired webhook, wrong bot token, Gmail app password, a scheduler's
+  PATH…); exit `9` when any sink failed or none is configured; `--only <type|name|index>`.
+  For Telegram it lists the chats that messaged your bot, so you can copy the `chat_id`.
+- Sink errors never print a URL, token or password (request errors quote the full URL —
+  for Discord and Telegram that *is* the credential).
+- The `webhook` sink's 400 explains that Discord/Slack want their own format.
+
+### Fixed
+- **Publisher TDM keys could not be read outside the author's machine**: `paper_fetch.py`
+  fetched them only through `~/.secrets/secret.ps1`, which the repo does not ship. It now
+  reads the same cross-platform secret store as `library_session.py` (DPAPI / Keychain /
+  env) and keeps `secret.ps1` only as a fallback. The "missing key" hints print
+  `python library_session.py secret set <NAME>`.
+- `VERSION` (and the User-Agent) still said 1.6.0 in the 1.6.1 release.
 
 ## [1.6.1] — 2026-10-24
 

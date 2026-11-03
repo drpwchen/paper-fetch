@@ -150,12 +150,14 @@ picked for your platform with no configuration:
 
 | Platform | Default backend | Store a secret |
 |---|---|---|
-| Windows | `dpapi` — DPAPI, CurrentUser, `~/.secrets` | `powershell -File ~/.secrets/secret.ps1 set LIB_USER` |
+| Windows | `dpapi` — DPAPI, CurrentUser, `~/.secrets` | `python library_session.py secret set LIB_USER` |
 | macOS | `keychain` — login Keychain, service `paper-fetch` | `security add-generic-password -s paper-fetch -a LIB_USER -U -w` |
 | Linux / other | `env` — environment variables | `export LIB_USER=...` |
 
 Put `-w` **last** in the `security` command so it prompts for the value — passing it inline
-leaves the password in your shell history and in `ps` output.
+leaves the password in your shell history and in `ps` output. `python library_session.py
+secret set <NAME>` works on macOS too (it prompts with input hidden); `secret check <NAME>`
+says whether a name is stored without ever printing the value.
 
 Override the choice with `secrets.backend` in `config.yaml` or the `SECRETS_BACKEND`
 environment variable (`dpapi` · `keychain` · `env` · `none`); an unknown name fails at
@@ -290,9 +292,26 @@ r/Scholar is your call. If you make it, this script does the bookkeeping — **i
 - **`status`** is the tracking table — when each request went out, how many replies, whether a
   link was offered, its status, whether you thanked the fulfiller. `<state_dir>/status.md` holds
   the same table as Markdown and is rewritten on every change (`status --md` / `--json` too).
-- **Notifications** go to `<state_dir>/events.jsonl` always, plus any of `ntfy`, `webhook`, or
-  `command` sinks (config `reddit.notify`). Events carry title, DOI, status and comment count —
-  never comment text. `notify-test` sends one test event through every sink.
+- **Notifications** go to `<state_dir>/events.jsonl` always — but nobody reads that file, so
+  set up at least one channel in `reddit.notify`. Until you do, `track`, `poll` and the top of
+  `status.md` say so loudly. Events carry title, DOI, status and comment count — never
+  comment text.
+
+  | Channel | You need | Secret (store with `python library_session.py secret set <NAME>`) |
+  |---|---|---|
+  | `ntfy` | the ntfy app, a long random topic name | access token — only for a protected topic |
+  | `discord` | a channel webhook (Channel settings → Integrations → Webhooks → Copy URL) | the webhook URL → `url_secret` |
+  | `telegram` | a bot from @BotFather; press **Start** in your bot once | the bot token → `token_secret`; `chat_id` is not secret (`notify-test` lists it for you) |
+  | `email` | an SMTP server (Gmail: `smtp.gmail.com`, 587, an **app password**) | the SMTP password → `password_secret` |
+  | `webhook` | anything that accepts the raw event JSON (not Discord/Slack — they want their own format) | `url_secret` |
+  | `command` | your own script; it gets the event JSON on stdin (use absolute paths) | — |
+
+  Each sink may take `events: [fulfilled, stale]` to receive only those (`replied`,
+  `fulfilled` = someone left a link, `verified`, `stale` = closed without a reply, `inbox`).
+  **`python reddit_request.py notify-test`** sends a test through every sink and prints
+  `OK` / `FAIL — why` per sink (exit `9` if any failed; `--only discord` tests one). A sink
+  that fails later, during a scheduled `poll`, is named at the top of `status.md` until a
+  delivery through it succeeds again.
 
 Requests nobody answers within `reddit.stale_days` (default 21) are closed, so polling
 ends. `reddit.on_idle` / `on_active` run a command when nothing is left to watch / when a

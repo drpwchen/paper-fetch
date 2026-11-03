@@ -19,11 +19,12 @@ when you say so* can sit on top of `track` — this repo does not ship one.)
     python reddit_request.py verify <post> <pdf> [--registry NCT…]   # or --manual
     python reddit_request.py close <post>                  # done by hand / give up
     python reddit_request.py status [--json]
-    python reddit_request.py notify-test                   # one test event to every sink
+    python reddit_request.py notify-test [--only SINK]     # test event → OK/FAIL per sink
 
 Exit codes: 0 ok · 1 usage · 2 nothing found (no metadata / PDF not verified) ·
 7 rate-limited by Reddit (backoff recorded in the state file — wait, do not loop) ·
-8 refused: the article is open access — fetch it, do not ask strangers for it.
+8 refused: the article is open access — fetch it, do not ask strangers for it ·
+9 notify-test: a sink failed, or no sink is usable.
 
 ## Why the OA gate refuses instead of warning (2026-10-24)
 
@@ -78,7 +79,7 @@ import requests
 
 from paper_config import CFG
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 _R = {
     "subreddit": "Scholar",
     "state_dir": "",
@@ -138,11 +139,271 @@ def _advance(rec: dict, status: str) -> bool:
 
 
 # ── notifications ────────────────────────────────────────────────────────────
+# Every event goes to events.jsonl. Each sink in `reddit.notify` is one way to reach a person:
+# ntfy · discord · telegram · email · webhook (raw event JSON) · command (event JSON on stdin).
+# A sink never stops the run; its last success/failure is kept in notify_status.json so a dead
+# sink shows up at the top of status.md instead of only in a log nobody reads.
+NOTIFY_EVENTS = ("replied", "fulfilled", "verified", "stale", "inbox")   # + "test", always sent
+NOTIFY_EXIT = 9                     # notify-test: at least one sink failed, or none is usable
+_HEAD = {"test": "test event", "replied": "new reply", "fulfilled": "reply with a link",
+         "verified": "PDF verified", "inbox": "inbox message", "stale": "closed — no reply"}
+# type → (required fields, {field_secret: what it holds}); "a|b" = one of the two
+_SINKS = {
+    "ntfy": (["topic"], {"token_secret": "access token (optional)"}),
+    "discord": (["url|url_secret"], {"url_secret": "webhook URL"}),
+    "telegram": (["token_secret", "chat_id"], {"token_secret": "bot token"}),
+    "email": (["host", "from", "to"], {"password_secret": "SMTP password"}),
+    "webhook": (["url|url_secret"], {"url_secret": "webhook URL"}),
+    "command": (["argv"], {}),
+}
+
+
+class NotifyError(Exception):
+    """A delivery failure whose message is safe to print: no URL, no token, no password."""
+
+
 def _secret(name: str) -> str | None:
     if not name:
         return None
     import library_session            # one secret store for the whole tool (dpapi/keychain/env)
     return library_session.secret_get_opt(name)
+
+
+def _store_hint(name: str) -> str:
+    import library_session
+    return library_session._store_hint(name)
+
+
+def _label(i: int, sink: dict) -> str:
+    return (sink or {}).get("name") or f"{i + 1}:{(sink or {}).get('type', '?')}"
+
+
+def sink_problems(sink: dict) -> list[str]:
+    """Why this sink cannot deliver, found before an event needs it (empty = looks usable)."""
+    sink = sink or {}
+    kind = sink.get("type")
+    if kind not in _SINKS:
+        return [f"unknown type {kind!r} (expected one of: {', '.join(_SINKS)})"]
+    need, secrets = _SINKS[kind]
+    out = []
+    for f in need:
+        if not any(sink.get(alt) for alt in f.split("|")):
+            out.append(f"missing `{f.replace('|', '` or `')}`")
+    for f, what in secrets.items():
+        name = sink.get(f)
+        if name and not _secret(name):
+            out.append(f"secret {name!r} ({what}) is not stored — {_store_hint(name)}")
+    if kind == "email" and sink.get("security", "starttls") not in ("starttls", "ssl", "none"):
+        out.append(f"`security` must be starttls, ssl or none (got {sink['security']!r})")
+    bad = [e for e in sink.get("events") or [] if e not in NOTIFY_EVENTS]
+    if bad:
+        out.append(f"unknown event(s) {bad} in `events` (expected: {', '.join(NOTIFY_EVENTS)})")
+    return out
+
+
+def has_sink() -> bool:
+    """True when at least one sink can actually reach a person (`jsonl` is the events file itself)."""
+    return any((s or {}).get("type") not in (None, "jsonl") and not sink_problems(s)
+               for s in _R["notify"] or [])
+
+
+NO_SINK = ("NO WORKING NOTIFY SINK — replies are only written to events.jsonl and nobody "
+           "will be told. Add reddit.notify (ntfy / discord / telegram / email / webhook / "
+           "command) to config.yaml, then run `python reddit_request.py notify-test`.")
+
+
+def warn_no_sink() -> None:
+    """Shout on stderr: a tracked request with no sink is a request whose answer goes unseen."""
+    for i, s in enumerate(_R["notify"] or []):
+        if (s or {}).get("type") != "jsonl":
+            for p in sink_problems(s):
+                print(f"[notify] {_label(i, s)}: {p}", file=sys.stderr)
+    if not has_sink():
+        print(f"\n!!! [reddit] {NO_SINK}\n", file=sys.stderr)
+
+
+def _render(ev: dict) -> tuple[str, str]:
+    """(title, body) shared by every human-facing sink. Never carries comment text."""
+    title = f"r/{_R['subreddit']}: {_HEAD.get(ev['event'], ev['event'])}"
+    body = "\n".join(x for x in (
+        ev.get("title"), ev.get("doi") and f"DOI {ev['doi']}",
+        ev.get("messages") and f"{ev['messages']} new private message(s)",
+        ev.get("status") and f"status {ev.get('status')} · {ev.get('comments', 0)} comment(s)",
+        ev.get("url")) if x)
+    return title, body
+
+
+def _redact(msg: str, *secrets: str | None) -> str:
+    for s in secrets:
+        if s:
+            msg = msg.replace(s, "<secret>")
+    return re.sub(r"https?://\S+", "<url>", msg)     # request errors quote the full URL
+
+
+def _post(url: str, *, secrets: tuple = (), **kw) -> requests.Response:
+    """requests.post whose exceptions never leak the URL (a Discord URL or bot token is a key)."""
+    try:
+        return requests.post(url, timeout=15, **kw)
+    except requests.RequestException as e:
+        raise NotifyError(f"{type(e).__name__}: {_redact(str(e), url, *secrets)[:160]}") from None
+
+
+def _http_fail(r: requests.Response, hints: dict) -> None:
+    if r.ok:
+        return
+    try:
+        detail = r.json()
+        detail = detail.get("description") or detail.get("message") or detail.get("error") or ""
+    except ValueError:
+        detail = ""
+    raise NotifyError(f"HTTP {r.status_code}" + (f" {str(detail)[:120]}" if detail else "")
+                      + (f" — {hints[r.status_code]}" if r.status_code in hints else ""))
+
+
+def _send_ntfy(sink: dict, ev: dict) -> None:
+    title, msg = _render(ev)
+    body = {"topic": sink["topic"], "title": title, "message": msg, "tags": ["books"]}
+    if ev.get("url"):
+        body["click"] = ev["url"]
+    # JSON publish to the server root carries UTF-8 titles safely (header Title: cannot);
+    # a browser-like UA because Cloudflare-fronted ntfy servers 403 bare python UAs.
+    headers = {"Content-Type": "application/json", "User-Agent": f"Mozilla/5.0 ({API_UA})"}
+    token = _secret(sink.get("token_secret", ""))
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    server = (sink.get("server") or "https://ntfy.sh").rstrip("/")
+    r = _post(server, secrets=(token,), data=json.dumps(body).encode("utf-8"), headers=headers)
+    _http_fail(r, {401: "token wrong or missing for a protected topic",
+                   403: "topic reserved by someone else, or the token lacks write access",
+                   429: "ntfy rate limit — wait"})
+
+
+def _send_discord(sink: dict, ev: dict) -> None:
+    url = _secret(sink.get("url_secret", "")) or sink.get("url")
+    title, msg = _render(ev)
+    payload = {"content": f"**{title}**\n{msg}"[:2000], "allowed_mentions": {"parse": []}}
+    if sink.get("username"):
+        payload["username"] = sink["username"]
+    for attempt in (1, 2):
+        r = _post(url, json=payload, headers={"User-Agent": API_UA})
+        if r.status_code == 429 and attempt == 1:
+            try:
+                wait = float(r.json().get("retry_after", 99))
+            except ValueError:
+                wait = 99
+            if wait <= 15:
+                time.sleep(wait)
+                continue
+        break
+    _http_fail(r, {401: "webhook token invalid — copy the webhook URL again",
+                   404: "webhook deleted or URL wrong — copy it again from the channel settings",
+                   429: "Discord rate limit — wait"})
+
+
+def _send_telegram(sink: dict, ev: dict) -> None:
+    token = _secret(sink["token_secret"])
+    title, msg = _render(ev)
+    r = _post(f"https://api.telegram.org/bot{token}/sendMessage", secrets=(token,),
+              json={"chat_id": sink["chat_id"], "text": f"{title}\n{msg}",
+                    "disable_web_page_preview": True})
+    _http_fail(r, {401: "bot token wrong (copy it again from @BotFather)",
+                   400: "chat_id wrong, or you have not sent your bot a message yet",
+                   403: "the bot was blocked or removed from that chat"})
+
+
+def _send_email(sink: dict, ev: dict) -> None:
+    import smtplib
+    from email.message import EmailMessage
+    title, msg = _render(ev)
+    to = sink["to"] if isinstance(sink["to"], list) else [sink["to"]]
+    m = EmailMessage()
+    m["Subject"], m["From"], m["To"] = title, sink["from"], ", ".join(to)
+    m.set_content(msg + "\n\n— paper-fetch reddit_request.py")
+    security = sink.get("security", "starttls")
+    port = int(sink.get("port") or (465 if security == "ssl" else 587))
+    pw = _secret(sink.get("password_secret", ""))
+    try:
+        cls = smtplib.SMTP_SSL if security == "ssl" else smtplib.SMTP
+        with cls(sink["host"], port, timeout=15) as s:
+            if security == "starttls":
+                s.starttls()
+            if pw:
+                s.login(sink.get("user") or sink["from"], pw)
+            s.send_message(m)
+    except smtplib.SMTPAuthenticationError as e:
+        raise NotifyError(f"login refused ({e.smtp_code}) — Gmail/Outlook need an app password, "
+                          "not your normal one") from None
+    except (smtplib.SMTPException, OSError) as e:
+        raise NotifyError(f"{type(e).__name__}: {_redact(str(e), pw)[:120]} — check host/port "
+                          "(587 + starttls, or 465 + ssl); some networks block outgoing SMTP") from None
+
+
+def _send_webhook(sink: dict, ev: dict) -> None:
+    url = _secret(sink.get("url_secret", "")) or sink.get("url")
+    r = _post(url, json=ev, headers={"User-Agent": API_UA})
+    _http_fail(r, {400: "the receiver wants its own format — use type discord/telegram, "
+                        "or put a converter behind type command"})
+
+
+def _send_command(sink: dict, ev: dict) -> None:
+    try:
+        subprocess.run(sink["argv"], input=json.dumps(ev, ensure_ascii=False),
+                       text=True, encoding="utf-8", timeout=30, check=True,
+                       capture_output=True)
+    except FileNotFoundError:
+        raise NotifyError(f"{sink['argv'][0]!r} not found — use absolute paths: a scheduler "
+                          "runs with a different PATH and working directory") from None
+    except subprocess.CalledProcessError as e:
+        raise NotifyError(f"exit {e.returncode}: {(e.stderr or '').strip()[-160:]}") from None
+    except subprocess.TimeoutExpired:
+        raise NotifyError("timed out after 30 s") from None
+
+
+_SEND = {"ntfy": _send_ntfy, "discord": _send_discord, "telegram": _send_telegram,
+         "email": _send_email, "webhook": _send_webhook, "command": _send_command}
+
+
+def _load_notify_status() -> dict:
+    try:
+        return json.loads((STATE_DIR / "notify_status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _record(label: str, kind: str, error: str | None) -> None:
+    st = _load_notify_status()
+    row = st.setdefault(label, {})
+    row["type"] = kind
+    if error:
+        row.update(failed=_now(), error=error)
+    else:
+        row["ok"] = _now()
+        row.pop("error", None)
+        row.pop("failed", None)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (STATE_DIR / "notify_status.json").write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def deliver(i: int, sink: dict, ev: dict) -> str | None:
+    """Send one event through one sink. Returns None on success, else a printable reason."""
+    label, kind = _label(i, sink), (sink or {}).get("type")
+    problems = sink_problems(sink)
+    try:
+        if problems:
+            raise NotifyError("; ".join(problems))
+        _SEND[kind](sink, ev)
+        err = None
+    except NotifyError as e:
+        err = str(e)
+    except Exception as e:                  # a dead sink must not stop the poll
+        err = f"{type(e).__name__}: {_redact(str(e))[:120]}"
+    _record(label, kind, err)
+    if err:
+        print(f"[notify] {label} failed: {err}", file=sys.stderr)
+        with EVENTS_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": _now(), "event": "notify_failed", "sink": label,
+                                 "for": ev.get("event"), "error": err}, ensure_ascii=False) + "\n")
+    return err
 
 
 def emit(event: str, rec: dict | None = None, *, notify: bool = True, **extra) -> None:
@@ -156,59 +417,19 @@ def emit(event: str, rec: dict | None = None, *, notify: bool = True, **extra) -
         fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
     if not notify:
         return
-    for sink in _R["notify"] or []:
-        kind = (sink or {}).get("type")
-        try:
-            if kind == "ntfy":
-                _notify_ntfy(sink, ev)
-            elif kind == "webhook":
-                requests.post(sink["url"], json=ev, timeout=15,
-                              headers={"User-Agent": API_UA}).raise_for_status()
-            elif kind == "command":
-                subprocess.run(sink["argv"], input=json.dumps(ev, ensure_ascii=False),
-                               text=True, encoding="utf-8", timeout=30, check=True)
-            elif kind != "jsonl":
-                print(f"[notify] unknown sink type {kind!r} — skipped", file=sys.stderr)
-        except Exception as e:                  # a dead sink must not stop the poll
-            print(f"[notify] {kind} failed: {type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
+    for i, sink in enumerate(_R["notify"] or []):
+        if (sink or {}).get("type") == "jsonl":
+            continue
+        wanted = (sink or {}).get("events")
+        if wanted and event != "test" and event not in wanted:
+            continue
+        deliver(i, sink, ev)
 
 
-NO_SINK = ("NO NOTIFY SINK CONFIGURED — replies are only written to events.jsonl and nobody "
-           "will be told. Add reddit.notify (ntfy / webhook / command) to config.yaml, then run "
-           "`notify-test`.")
-
-
-def has_sink() -> bool:
-    """True when at least one sink actually reaches a person (`jsonl` is the events file itself)."""
-    return any((s or {}).get("type") not in (None, "jsonl") for s in _R["notify"] or [])
-
-
-def warn_no_sink() -> None:
-    """Shout on stderr: a tracked request with no sink is a request whose answer goes unseen."""
-    if not has_sink():
-        print(f"\n!!! [reddit] {NO_SINK}\n", file=sys.stderr)
-
-
-def _notify_ntfy(sink: dict, ev: dict) -> None:
-    head = {"test": "test event", "replied": "new reply", "fulfilled": "reply with a link",
-            "verified": "PDF verified", "inbox": "inbox message",
-            "stale": "closed — no reply"}.get(ev["event"], ev["event"])
-    msg = "\n".join(x for x in (ev.get("title"), ev.get("doi") and f"DOI {ev['doi']}",
-                                f"status {ev.get('status')} · {ev.get('comments', 0)} comment(s)",
-                                ev.get("url")) if x)
-    body = {"topic": sink["topic"], "title": f"r/{_R['subreddit']}: {head}", "message": msg,
-            "tags": ["books"]}
-    if ev.get("url"):
-        body["click"] = ev["url"]
-    # JSON publish to the server root carries UTF-8 titles safely (header Title: cannot);
-    # a browser-like UA because Cloudflare-fronted ntfy servers 403 bare python UAs.
-    headers = {"Content-Type": "application/json", "User-Agent": f"Mozilla/5.0 ({API_UA})"}
-    token = _secret(sink.get("token_secret", ""))
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    server = (sink.get("server") or "https://ntfy.sh").rstrip("/")
-    requests.post(server, data=json.dumps(body).encode("utf-8"), headers=headers,
-                  timeout=15).raise_for_status()
+def failing_sinks() -> list[tuple[str, dict]]:
+    """Sinks whose most recent delivery failed (a later success clears it)."""
+    live = {_label(i, s) for i, s in enumerate(_R["notify"] or [])}
+    return [(k, v) for k, v in _load_notify_status().items() if v.get("error") and k in live]
 
 
 # ── metadata ─────────────────────────────────────────────────────────────────
@@ -707,6 +928,8 @@ def status_markdown(st: dict) -> str:
     tail = ("\nDrafted, not posted: " + ", ".join(d.get("doi") or "?" for d in drafts) + "\n"
             if drafts else "")
     warn = "" if has_sink() else f"> ⚠️ **{NO_SINK}**\n\n"
+    warn += "".join(f"> ⚠️ **Notify sink `{k}` failing since {v['failed'][:16]} UTC:** {v['error']} "
+                    "— fix it, then `notify-test` clears this.\n\n" for k, v in failing_sinks())
     return f"# r/{_R['subreddit']} requests — {_now()[:16]} UTC\n\n" + warn + head + body + tail
 
 
@@ -735,12 +958,62 @@ def cmd_status(a) -> int:
     return 0
 
 
+def _telegram_chat_ids(sink: dict) -> list[str]:
+    """chat_id discovery: the chats that recently messaged the bot (getUpdates)."""
+    token = _secret(sink.get("token_secret", ""))
+    if not token:
+        return []
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=15)
+        ups = r.json().get("result", []) if r.ok else []
+    except (requests.RequestException, ValueError):
+        return []
+    seen = {}
+    for u in ups:
+        c = (u.get("message") or u.get("channel_post") or {}).get("chat") or {}
+        if "id" in c:
+            seen[str(c["id"])] = c.get("title") or c.get("username") or c.get("first_name") or ""
+    return [f"{k} ({v})" for k, v in seen.items()]
+
+
 def cmd_notify_test(a) -> int:
-    emit("test", {"title": "paper-fetch notification test", "status": "test"},
-         sinks=[s.get("type") for s in _R["notify"] or []])
-    print(f"test event written to {EVENTS_FILE} and sent to: "
-          + (", ".join(s.get("type", "?") for s in _R["notify"]) or "(no sinks configured)"))
-    return 0
+    """Send one test event through every sink (or --only one) and say, per sink, OK or why not."""
+    sinks = [(i, s) for i, s in enumerate(_R["notify"] or []) if (s or {}).get("type") != "jsonl"]
+    if a.only:
+        sinks = [(i, s) for i, s in sinks
+                 if a.only in (str(i + 1), (s or {}).get("type"), (s or {}).get("name"), _label(i, s))]
+        if not sinks:
+            print(f"no sink matches {a.only!r} (give a type, a `name`, or a 1-based index)",
+                  file=sys.stderr)
+            return 1
+    ev = {"ts": _now(), "event": "test", "post_id": None, "url": None,
+          "title": "paper-fetch notification test", "doi": None, "record_id": None,
+          "status": "test", "comments": 0}
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with EVENTS_FILE.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({**ev, "sinks": [_label(i, s) for i, s in sinks]}) + "\n")
+    print(f"test event written to {EVENTS_FILE}")
+    if not sinks:
+        print(f"\n!!! {NO_SINK}")
+        return NOTIFY_EXIT
+    failed = 0
+    for i, s in sinks:
+        err = deliver(i, s, ev)
+        print(f"  {'OK  ' if not err else 'FAIL'}  {_label(i, s)}" + (f"  — {err}" if err else ""))
+        failed += bool(err)
+        if s.get("type") in ("discord", "webhook") and s.get("url") and not s.get("url_secret"):
+            print("        note: a webhook URL is a password — anyone holding it can post. "
+                  "Store it and use `url_secret` instead of `url`.")
+        if s.get("type") == "telegram" and err and "chat_id" in err:
+            ids = _telegram_chat_ids(s)
+            print("        chats that messaged this bot: " + (", ".join(ids) if ids else
+                  "none yet — open your bot in Telegram, press Start, then re-run"))
+        if s.get("type") == "ntfy" and not s.get("token_secret") and \
+                (s.get("server") or "https://ntfy.sh").rstrip("/") == "https://ntfy.sh":
+            print("        note: an open ntfy.sh topic is readable by anyone who guesses its name "
+                  "— make it long and random.")
+    print(f"{len(sinks) - failed}/{len(sinks)} sink(s) delivered")
+    return NOTIFY_EXIT if failed else 0
 
 
 def main(argv=None) -> int:
@@ -770,7 +1043,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("status")
     p.add_argument("--json", action="store_true")
     p.add_argument("--md", action="store_true", help="markdown table (also written by poll)")
-    sub.add_parser("notify-test")
+    p = sub.add_parser("notify-test")
+    p.add_argument("--only", help="one sink: its type, `name`, or 1-based index")
     a = ap.parse_args(argv)
     try:
         return globals()[f"cmd_{a.cmd.replace('-', '_')}"](a)
