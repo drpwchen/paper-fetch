@@ -90,7 +90,11 @@ working code:
 A prefix that is not in the table is not yet "no route": journals move publishers and keep their
 DOI prefix, so `fetch` resolves `doi.org` once and, when the landing host belongs to a listed
 route (Liebert `10.1089` → `journals.sagepub.com` since Sage bought them, for instance), uses that
-route under the new prefix. Only when the host matches nothing is it exit `6`.
+route under the new prefix. Only when the host matches nothing is it exit `6`. A *listed*
+prefix is checked the same way: Ann Rheum Dis kept BMJ's `10.1136` when it moved to Elsevier in
+2024, so `10.1136/annrheumdis-*` lands on `linkinghub.elsevier.com/retrieve/pii/…` — `fetch`
+then uses the Elsevier route (and `paper_fetch.py` the Elsevier TDM API, by that PII) instead
+of the BMJ one.
 | **citation-meta** (`kind: meta`) | resolver → article HTML's `<meta name="citation_pdf_url">` → fetch with Referer. Headless. | `10.1001` JAMA · `10.1093` Oxford · `10.1542` Pediatrics · `10.1183` ERJ · `10.3171` J Neurosurg · `10.1038` Nature |
 | **citation-meta + headful nav** (`kind: meta, nav: true`) | same, but the resolver runs as a real headful navigation to clear a Cloudflare challenge | `10.1136` BMJ · `10.3174` AJNR · `10.2967` J Nucl Med |
 | **signed-URL** (`kind: lww`) | multi-step walk to a signed PDF URL: resolver → scrape article number → viewer HTML → signed `pdfUrl` with the right Referer chain, plus an Ovid-OCE fallback for ahead-of-print articles and concurrent-licence-seat (E3) back-off | `10.1097`/`10.1161`/`10.1213`/`10.2215` LWW/Ovid |
@@ -221,7 +225,7 @@ your library's SFX link for a manual finish. `sha256` lets batch callers dedupe.
 | `4` | profile busy (another fetch holds the lock) — `library_session.py` only | **retry serially** — not a missing paper |
 | `5` | watchdog abort (`PAPERFETCH_TIMEOUT_S`, default 240 s) — `library_session.py` only | **retry once** — not a missing paper |
 | `6` | no route for this publisher prefix — `library_session.py` only | check `holdings.py`; a subscribed prefix is worth a new route |
-| `7` | **blocked** — every attempt, including the headful-navigation retry, ended at a bot wall (`js_challenge` / `cf_*` / `rate_limited`) — `library_session.py` only | wait, then retry; or fetch from your own logged-in browser. The wall answered, not the publisher |
+| `7` | **blocked** — every attempt ended at a bot wall (`js_challenge` / `cf_*` / `rate_limited`; for `library_session.py` including the headful-navigation retry). `paper_fetch.py` exits `7` when nothing but walls answered — e.g. `pmc_challenge`: PMC / Europe PMC serving a small JavaScript-challenge page instead of the PDF (envelope `blocked: true`, the URLs in `blocked_by`) | wait, then retry; or fetch from your own browser. The wall answered, not the publisher. For `pmc_challenge`, open the **PDF URL itself** in a real browser (the article page is not enough) |
 
 Only `2` tells you anything about the article. `3`, `4`, `5`, `6` and `7` all mean "fix something
 and try again" — recording any of them as "no full text" is the single easiest way to wrongly

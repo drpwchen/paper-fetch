@@ -108,7 +108,15 @@ user's own browser, not another automation trick. Also: **a DOI prefix names who
 DOI, not who serves it today** — journals move publishers (Respiratory Care `10.4187` → Sage,
 Liebert `10.1089` → Sage) and their back catalogue moves with them. `fetch` resolves `doi.org`
 once for an unknown prefix and matches the landing host against the routes before saying
-`no_route`.
+`no_route` — and since 1.8.0 for a known prefix too (Ann Rheum Dis `10.1136/annrheumdis-*` is
+BMJ's prefix on an Elsevier journal; the BMJ meta route was answering exit 2 for it).
+
+Seventh (2026-10-15, issue #7): **a small HTML page from PMC / Europe PMC is a wall, not "no
+PDF".** `pmc.ncbi.nlm.nih.gov/articles/PMC…/pdf/` (~1.8 KB) and `europepmc.org/…?pdf=render`
+(~5.5 KB) answer scripts with a JavaScript challenge; `paper_fetch.py` names it `pmc_challenge`
+and exits `7`. A real browser passes only by navigating to the **PDF URL itself** and fetching
+it from inside that page — opening the article page first is not enough. The one honest
+"no PDF" is Europe PMC's own `hasPDF=N` (author manuscript as HTML only), which is checked.
 
 ## Calling it from an orchestrator
 
@@ -118,7 +126,8 @@ once for an unknown prefix and matches the landing host against the routes befor
 - **Exit codes** (same table for both scripts): `0` PDF obtained · `1` usage error · `2` a route
   ran and came back empty · `3` **auth failed / session expired** · `4` profile busy · `5`
   watchdog abort · `6` no route for this publisher prefix · `7` **blocked** — every attempt
-  (headless request, then the headful-navigation retry) ended at a bot wall.
+  (headless request, then the headful-navigation retry) ended at a bot wall. `paper_fetch.py`
+  uses `0`/`1`/`2`/`7` (since 1.8.0 `7` when only bot walls answered, envelope `blocked: true`).
 - **Only `2` is evidence about the PAPER.** `3`, `4`, `5`, `6` and `7` all mean "fix it and
   retry" — recording any of them as unavailable is the easiest way to wrongly write a paper
   off. `7` in particular used to be `2`: Springer's JS challenge on a *subscribed* article
@@ -186,7 +195,8 @@ explains the entitlement model. They are written to teach the method, not just t
   `holdings.sqlite`). Every fix lands here first, then is synced to live — back live up to
   `Documents/Projects/_holding/paper-fetch-live-pre-<ver>-<date>/` before overwriting. Files that
   exist only in live and must never be copied here: `webbridge_fallback.py` /
-  `ck_webbridge_fallback.py` (they drive the author's own browser bridge) and `scrape_holdings.py`
+  `ck_webbridge_fallback.py` / `reddit_post_webbridge.py` / `edge_bridge.py` (they drive the
+  author's own browser) and `scrape_holdings.py`
   (the public repo ships the holdings *schema*, not a scraper — see docs/holdings.md). The former
   private institution-specific fork is retired (2026-08-08); do not revive it.
 - `config.yaml` in this checkout is a **test config with fake `example.edu` endpoints** (gitignored),

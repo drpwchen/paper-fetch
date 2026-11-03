@@ -12,6 +12,8 @@
                                                    # 是不是「那一篇」，整本增刊會自動切出該篇
 
 Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用法錯誤 · 2=自動路線全敗
+    · 7=被牆擋（沒拿到 PDF，而且該有 PDF 的候選全是 bot 牆——含 PMC／Europe PMC 的 JS
+      challenge；envelope `blocked: true`）。7 對論文零資訊：換真瀏覽器，不是「無全文」。
 JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
                 partial_path?, reject_reason?, oa_claimed?, free_at_publisher?, blocked_by?[],
                 verify?, verify_detail?, volume_path?, extracted_pages?,
@@ -40,6 +42,8 @@ Elsevier TDM 另看 `X-ELS-Status` 回應 header——未授權的 DOI 會回 HT
                          ⚠ 2026-09 起 link.springer.com 對所有腳本請求回 JS「Client Challenge」
                          （HTTP 200、3 KB HTML）；此路線只負責把它認出來，OA 全文改靠 PMC
     10.3390            → MDPI：mdpi-res.com CDN 直連（www.mdpi.com 本站是 Cloudflare 403）
+    其他前綴           → 先解一次 doi.org：落地 host 是 Elsevier／Wiley／Springer 就走該家 TDM
+                         （例：Ann Rheum Dis 10.1136/annrheumdis-* → linkinghub PII → Elsevier TDM）
     其他 / 上述失敗    → Unpaywall 直連 OA PDF
     仍失敗             → PubMed free full text 旗標 → 出版社落地頁（沒 bot 牆的出版社這裡就拿到）
     全部失敗           → 印機構 SFX 連結，機構登入手動下載
@@ -149,6 +153,65 @@ def challenge_kind(content: bytes):
     return None
 
 
+# PMC / Europe PMC (issue #7, 2026-10-15): for an article that IS in PMC, the PDF endpoints
+# answer a script with HTTP 200 + a small HTML page that runs a JavaScript challenge —
+# pmc.ncbi.nlm.nih.gov/articles/PMC…/pdf/ ~1.8 KB, europepmc.org/articles/PMC…?pdf=render
+# ~5.5 KB. No marker above names it, so it used to fall through as "no PDF" and the run read
+# like "no OA copy". A real browser that navigates to the PDF URL ITSELF (not the article
+# page) passes and an in-page fetch() then returns application/pdf.
+_PMC_HOSTS = ("pmc.ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov", "europepmc.org",
+              "www.europepmc.org")
+_PMC_STUB_MAX = 20_000     # a real PDF is never this small; an article HTML page is bigger
+
+
+def _is_pmc_url(url) -> bool:
+    if not url:
+        return False
+    host = re.sub(r"^https?://", "", url.lower()).split("/")[0]
+    return host in _PMC_HOSTS
+
+
+def _europepmc_has_pdf(pmcid):
+    """Europe PMC's own `hasPDF` flag for a PMCID: True / False / None (unknown or error).
+
+    `hasPDF=N` is the one case where a small HTML answer from the render endpoint is an honest
+    "no PDF here" (author manuscript served as HTML only), not a wall."""
+    try:
+        r = requests.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                         params={"query": f"PMCID:{pmcid}", "format": "json",
+                                 "resultType": "lite"},
+                         timeout=20, headers={"User-Agent": UA})
+        if r.status_code != 200:
+            return None
+        for rec in ((r.json() or {}).get("resultList") or {}).get("result") or []:
+            flag = (rec.get("hasPDF") or "").upper()
+            if flag in ("Y", "N"):
+                return flag == "Y"
+    except Exception as e:
+        print(f"  Europe PMC hasPDF 查詢略過: {e}")
+    return None
+
+
+def pmc_stub_kind(url, status, content: bytes, final_url=None):
+    """Classify a non-PDF answer from a PMC / Europe PMC PDF endpoint.
+
+    Returns "pmc_challenge" (a JS challenge page — the PDF is behind it), "pmc_no_pdf"
+    (Europe PMC says it holds no PDF for this PMCID) or None (not a PMC stub)."""
+    if status != 200 or content[:4] == b"%PDF" or len(content) > _PMC_STUB_MAX:
+        return None
+    if not (_is_pmc_url(url) or _is_pmc_url(final_url)):
+        return None
+    low = content[:_PMC_STUB_MAX].lower()
+    if b"<script" not in low and b"<html" not in low and b"<!doctype" not in low:
+        return None
+    both = f"{url} {final_url or ''}"
+    m = re.search(r"(PMC\d+)", both, re.I)
+    if m and "europepmc" in both.lower():
+        if _europepmc_has_pdf(m.group(1).upper()) is False:
+            return "pmc_no_pdf"
+    return "pmc_challenge"
+
+
 def pdf_gate(content: bytes):
     """回 (ok, reason)。多頁一律放行；單頁才看 pre-proof 標記與抽出字量。"""
     try:
@@ -228,7 +291,12 @@ def route_elsevier(doi):
     insttoken = get_secret("ELSEVIER_INSTTOKEN")  # 選用；校外解付費才需
     if insttoken:
         headers["X-ELS-Insttoken"] = insttoken
-    url = f"https://api.elsevier.com/content/article/doi/{doi}"
+    # A DOI minted by another publisher but hosted by Elsevier today (Ann Rheum Dis
+    # 10.1136/annrheumdis-* since 2024, issue #7) is looked up by the PII its doi.org
+    # landing carries; Elsevier's own 10.1016 DOIs keep the DOI endpoint.
+    pii = landing_pii(doi)
+    url = (f"https://api.elsevier.com/content/article/pii/{pii}" if pii
+           else f"https://api.elsevier.com/content/article/doi/{doi}")
     # No "view" param: with Accept: application/pdf it is unnecessary, and view=FULL
     # gets rejected (HTTP 400 INVALID_INPUT "View parameter ... not valid") for a
     # subset of articles (observed on several Archives of PMR DOIs) while the same
@@ -566,7 +634,18 @@ def _grab(url, referer=None):
     if r.status_code == 200 and valid_pdf(r.content):
         return r.content
     kind = challenge_kind(r.content) if r.content[:4] != b"%PDF" else None
-    if kind:
+    if not kind:
+        pmc = pmc_stub_kind(url, r.status_code, r.content, getattr(r, "url", None))
+        if pmc == "pmc_no_pdf":
+            print("  Europe PMC hasPDF=N：這篇在 PMC 只有 HTML 全文（作者稿），沒有 PDF 可抓")
+        elif pmc:
+            kind = pmc
+    if kind == "pmc_challenge":
+        _BLOCKED.append((kind, url))
+        print(f"  ✗ PMC／Europe PMC 回的是 JS challenge 頁（{len(r.content)} bytes HTML），"
+              "不是「沒有 PDF」—— 真瀏覽器要直接 navigate 到這個 PDF 網址本身"
+              "（只開文章頁不夠），再頁內 fetch")
+    elif kind:
         _BLOCKED.append((kind, url))
         print(f"  ✗ 回應是 bot 牆（{kind}）而非 PDF —— 腳本過不了，真瀏覽器（layer 2 headful）可以")
     return None
@@ -645,8 +724,54 @@ def route_pubmed_free(doi):
     return _grab_via_landing(f"https://doi.org/{doi}")
 
 
+_LANDING = {}          # doi → final doi.org landing URL (one lookup per DOI per process)
+_LANDING_HOPS = 6
+
+
+def doi_landing(doi):
+    """Follow doi.org's redirect chain by Location headers only (no body, no JS) → final URL.
+
+    None when the lookup fails. A bot wall on the last hop still tells us the host."""
+    if doi in _LANDING:
+        return _LANDING[doi]
+    from urllib.parse import urljoin
+    url, final = f"https://doi.org/{doi}", None
+    for _ in range(_LANDING_HOPS):
+        try:
+            r = requests.get(url, allow_redirects=False, timeout=15, stream=True,
+                             headers={"User-Agent": UA})
+            r.close()
+        except Exception as e:
+            print(f"  doi.org 落地查詢失敗（{type(e).__name__}）→ 只能依前綴選路線")
+            break
+        final = url
+        loc = r.headers.get("location")
+        if not (300 <= r.status_code < 400 and loc):
+            break
+        url = final = urljoin(url, loc)
+    _LANDING[doi] = final
+    return final
+
+
+_PII_RE = re.compile(r"/pii/([SB][0-9]{7}[0-9X][0-9]{7}[0-9X])", re.I)
+
+
+def landing_pii(doi):
+    """Elsevier PII from an already-resolved doi.org landing (linkinghub / ScienceDirect)."""
+    m = _PII_RE.search(_LANDING.get(doi) or "")
+    return m.group(1).upper() if m else None
+
+
+def _landing_host(url):
+    return re.sub(r"^https?://", "", (url or "").lower()).split("/")[0]
+
+
 def routes_for(doi):
-    """依 DOI 前綴排序路線，永遠以 Unpaywall 兜底，最後問 PubMed 的 free 旗標。"""
+    """依 DOI 前綴排序路線，永遠以 Unpaywall 兜底，最後問 PubMed 的 free 旗標。
+
+    前綴不在表上時解一次 doi.org、用落地 host 選 TDM 路線：DOI 前綴是「誰註冊的」，
+    不是「現在誰在出版」（issue #7：Ann Rheum Dis `10.1136/annrheumdis-*` 2024 起由 Elsevier
+    出版，doi.org 落在 linkinghub.elsevier.com/retrieve/pii/…）。"""
     d = doi.lower()
     if d.startswith("10.1016"):
         primary = [route_elsevier]
@@ -658,7 +783,24 @@ def routes_for(doi):
         primary = [route_mdpi]
     else:
         primary = []
+        host = _landing_host(doi_landing(doi))
+        route = _HOST_ROUTES.get(host)
+        if route:
+            primary = [route]
+            print(f"  doi.org 落在 {host}（前綴 {doi.split('/')[0]} 不是這家）→ 走 "
+                  f"{route.__name__.removeprefix('route_')} 路線"
+                  + (f"（PII {landing_pii(doi)}）" if route is route_elsevier and landing_pii(doi)
+                     else ""))
     return primary + [route_unpaywall, route_pubmed_free]
+
+
+# Landing host → TDM route, for DOIs whose prefix belongs to another registrant.
+_HOST_ROUTES = {
+    "linkinghub.elsevier.com": route_elsevier,
+    "www.sciencedirect.com": route_elsevier,
+    "onlinelibrary.wiley.com": route_wiley,
+    "link.springer.com": route_springer,
+}
 
 
 def content_check(pdf: bytes, title, out):
@@ -725,6 +867,7 @@ def run_ladder(doi, out, title=None):
           verified to be THIS article (a title_absent file is `<stem>.rejected.pdf`, not 0)
       1 = usage error
       2 = every automatic route exhausted — envelope carries the resolver link
+      7 = nothing but bot walls answered (envelope `blocked`) — not evidence about the paper
     """
     started = time.time()
     tried = []
@@ -788,6 +931,14 @@ def run_ladder(doi, out, title=None):
     elif _BLOCKED:
         kinds = sorted({k for k, _ in _BLOCKED})
         print(f"\n✗ 候選 URL 有 {len(_BLOCKED)} 個被 bot 牆（{', '.join(kinds)}）擋下，其餘皆無效。")
+        if not title_reject:
+            print("  exit 7（blocked）：這是牆，不是「這篇沒有全文」。")
+        pmc_walled = [u for k, u in _BLOCKED if k == "pmc_challenge"]
+        if pmc_walled:
+            print("  PMC／Europe PMC 有這篇，但 PDF 端點回 JS challenge → 用真瀏覽器直接開 PDF 網址"
+                  "本身（不是文章頁），等 challenge 過、再存檔／頁內 fetch：")
+            for u in pmc_walled:
+                print(f"    {u}")
         if _FREE_AT_PUBLISHER:
             print("  PubMed 標記 free full text：出版社站上就是免費的，只是擋腳本 → layer 2 的 direct "
                   "路線（真瀏覽器直連出版社，不需機構帳號）：library_session.py fetch <DOI> <out.pdf>")
@@ -814,6 +965,9 @@ def run_ladder(doi, out, title=None):
             "partial_path": partial_path, "reject_reason": reject_reason,
             "oa_claimed": _OA_CLAIMED, "free_at_publisher": _FREE_AT_PUBLISHER,
             "blocked_by": [{"kind": k, "url": u} for k, u in _BLOCKED],
+            # Nothing came back but walls → exit 7, like library_session: the wall, not the
+            # paper. A content rejection or a wrong-article PDF is evidence → stays 2.
+            "blocked": bool(_BLOCKED) and not _LAST_REJECT and not title_reject,
             **title_rej,
             "elapsed_s": round(time.time() - started, 1)}
 
@@ -860,7 +1014,14 @@ def main():
         print(json.dumps(env, ensure_ascii=False))
     else:
         env = run_ladder(doi, out, title)
-    sys.exit(0 if env["ok"] else 2)
+    sys.exit(exit_code(env))
+
+
+def exit_code(env) -> int:
+    """0 ok · 7 every candidate that should have held the PDF was a bot wall · 2 otherwise."""
+    if env["ok"]:
+        return 0
+    return 7 if env.get("blocked") else 2
 
 
 if __name__ == "__main__":

@@ -5,6 +5,36 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-11-03 — route by landing host for moved journals; PMC JS challenge is a wall (issue #7)
+
+Two ways a fetch said "no full text" when the full text was there.
+
+### Added
+- **`paper_fetch.py` exits `7` (blocked)** when no PDF came back and every candidate that
+  should have held one was a bot wall — the code `library_session.py` already used. The
+  failed envelope carries `blocked: true`. A content rejection or a wrong-article PDF is
+  evidence about the paper and stays `2`. Callers that treated every non-zero exit as "try
+  the next layer" are unaffected; callers keyed on `== 2` should treat `7` as "retry in a
+  real browser", never as "no full text".
+- **`pmc_challenge`**: PMC (`pmc.ncbi.nlm.nih.gov/articles/PMC…/pdf/`) and Europe PMC
+  (`?pdf=render`) answer scripts with HTTP 200 + a small JavaScript-challenge page (1.8 KB /
+  5.5 KB) for articles they do hold. That is now recorded in `blocked_by` and named in the
+  log, with the URL to open: a real browser must navigate to the **PDF URL itself** (the
+  article page is not enough), then fetch in-page. Europe PMC's own `hasPDF=N` (author
+  manuscript as HTML only) is checked and reported as the honest "no PDF" it is.
+- **`paper_fetch.py` routes by doi.org landing host** for prefixes it has no TDM route for:
+  landing on Elsevier (linkinghub / ScienceDirect), Wiley or Springer uses that publisher's
+  TDM route. Elsevier is asked by the **PII** from the landing URL.
+
+### Fixed
+- **Ann Rheum Dis `10.1136/annrheumdis-*`** (Elsevier since 2024, still BMJ's prefix) went
+  to the BMJ `meta` route, found no `citation_pdf_url` and exited `2`. `library_session.py`
+  now checks the landing host for known prefixes too, and switches route when the host
+  belongs to a different one (`10.1136/annrheumdis-*` → the Elsevier `ck` route, PII from the
+  landing URL when CrossRef has none). One header-only request; a failed lookup keeps the
+  prefix route.
+- Tests: `tests/test_landing_routes.py`, `tests/test_pmc_challenge.py` (no network).
+
 ## [1.7.0] — 2026-11-03
 
 Notifications that other people can actually set up: three new channels, a test that tells

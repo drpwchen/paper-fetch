@@ -350,7 +350,17 @@ _HOST_HINTS: dict[str, str] = {
 _HOST_RESOLVE_HOPS = 6
 
 
-def _route_by_host(doi: str) -> tuple[str, dict] | None:
+_LANDING: dict[str, str] = {}   # doi → last URL of the doi.org chain seen by _route_by_host
+_PII_IN_URL = re.compile(r"/pii/([SB][0-9]{7}[0-9X][0-9]{7}[0-9X])", re.I)
+
+
+def _landing_pii(doi: str) -> str | None:
+    """Elsevier PII from the doi.org landing `_route_by_host` saw (linkinghub /retrieve/pii/…)."""
+    m = _PII_IN_URL.search(_LANDING.get(doi) or "")
+    return m.group(1).upper() if m else None
+
+
+def _route_by_host(doi: str, quiet: bool = False) -> tuple[str, dict] | None:
     """Unknown prefix → resolve doi.org once and match the LANDING HOST against the routes.
 
     A DOI prefix identifies the registrant that minted the DOI, not the site that serves the
@@ -386,6 +396,7 @@ def _route_by_host(doi: str) -> tuple[str, dict] | None:
             return None
         host = urlsplit(url).netloc.lower()
         seen.append(host)
+        _LANDING[doi] = url
         if host in hosts:
             owner = hosts[host]
             return owner, ROUTES[owner]
@@ -393,9 +404,42 @@ def _route_by_host(doi: str) -> tuple[str, dict] | None:
         if not (300 <= r.status_code < 400 and loc):
             break
         url = urljoin(url, loc)
-    print(f"[route] doi.org lands on {' → '.join(seen[1:] or seen)} — no route serves that host",
-          file=sys.stderr)
+    if not quiet:
+        print(f"[route] doi.org lands on {' → '.join(seen[1:] or seen)} — no route serves that host",
+              file=sys.stderr)
     return None
+
+
+def _resolve_route(doi: str) -> dict:
+    """ROUTES entry for this DOI, corrected by where doi.org actually lands.
+
+    Unknown prefix → `_route_by_host` (issue #5). A KNOWN prefix can be wrong too: the
+    journal moved and its back catalogue went with it, while the prefix stayed (Ann Rheum Dis
+    `10.1136/annrheumdis-*` — BMJ prefix, Elsevier since 2024: doi.org →
+    linkinghub.elsevier.com/retrieve/pii/…, and the BMJ `meta` route found no
+    citation_pdf_url → exit 2, issue #7). So a known prefix is checked too, and switched only
+    when the landing host belongs to a route that differs from the prefix's own. One
+    header-only request, no proxy; a failed lookup keeps the prefix route."""
+    prefix = doi.split("/")[0]
+    route = ROUTES.get(prefix, {})
+    found = _route_by_host(doi, quiet=bool(route))
+    if not found:
+        return route
+    owner, other = found
+    if not route:
+        ROUTES[prefix] = dict(other, aliased_from=owner)
+        print(f"[route] {prefix} is not in ROUTES, but doi.org lands on {other.get('host') or owner}"
+              f" → using the {owner} route ({other['kind']})", file=sys.stderr)
+        _log({"kind": "route", "doi": doi, "prefix": prefix, "status": "host_alias",
+              "owner": owner})
+        return ROUTES[prefix]
+    if owner == prefix or other == route:
+        return route
+    print(f"[route] {doi} lands on {urlsplit(_LANDING.get(doi, '')).netloc} — the {owner} route "
+          f"({other['kind']}), not the {prefix} one ({route.get('kind')}): the journal moved",
+          file=sys.stderr)
+    _log({"kind": "route", "doi": doi, "prefix": prefix, "status": "host_moved", "owner": owner})
+    return dict(other, aliased_from=owner)
 
 
 # --- secret store ----------------------------------------------------------
@@ -1419,7 +1463,7 @@ def _direct_pdf(page, doi: str, out: Path) -> str:
     return "fail"
 
 
-def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> str:
+def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool, route: dict | None = None) -> str:
     """tpl route: authenticated proxy. allow_nav=False → silent request.get (phase 1);
     allow_nav=True → run CF challenge in a real browser first (phase 2).
 
@@ -1428,7 +1472,7 @@ def _proxy_pdf(page, doi: str, out: Path, allow_nav: bool) -> str:
     on 2026-09-01 that turned one unsubscribed Sage article into four proxy requests
     (reader HTML ×2, then 30 s timeout ×2)."""
     prefix = doi.split("/")[0]
-    route = ROUTES.get(prefix)
+    route = route or ROUTES.get(prefix)      # run_fetch passes the landing-corrected route
     if not route or route.get("kind") != "tpl":
         _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "n/a",
               "status": "unknown_prefix"})
@@ -2191,7 +2235,9 @@ def _ck_pdf(page, doi: str, out: Path) -> str:
       fetch the PDF URL directly instead. PII for the URL comes from _crossref_pii.
     """
     prefix = doi.split("/")[0]
-    pii = _crossref_pii(doi)
+    # CrossRef first; then the doi.org landing (a journal that moved to Elsevier keeps its old
+    # registrant's DOI, and its PII may only show up in linkinghub's /retrieve/pii/… URL).
+    pii = _crossref_pii(doi) or _landing_pii(doi)
     if not pii:
         print(f"[ck] no PII for {doi} (CrossRef alternative-id empty) — cannot build the "
               "ClinicalKey PDF URL", file=sys.stderr)
@@ -2438,19 +2484,9 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
     global _LAST_WALL
     _LAST_WALL = None
     prefix = doi.split("/")[0]
-    route = ROUTES.get(prefix, {})
-    if not route:
-        # Unknown prefix ≠ no route: the journal may live on a host a listed route already
-        # serves (issue #5). One doi.org lookup settles it; the alias is registered so every
-        # ROUTES[prefix] lookup downstream (tpl template, scorecard) sees the same route.
-        found = _route_by_host(doi)
-        if found:
-            owner, route = found
-            ROUTES[prefix] = dict(route, aliased_from=owner)
-            print(f"[route] {prefix} is not in ROUTES, but doi.org lands on {route.get('host') or owner}"
-                  f" → using the {owner} route ({route['kind']})", file=sys.stderr)
-            _log({"kind": "route", "doi": doi, "prefix": prefix, "status": "host_alias",
-                  "owner": owner})
+    # Unknown prefix ≠ no route, and a known prefix ≠ the right route: the journal may live
+    # on a host another route serves (issues #5, #7). One doi.org lookup settles both.
+    route = _resolve_route(doi)
     kind = route.get("kind")
     # Layer 1 — API/OA/TDM (no proxy, no CF, no login). Works out of the box. It runs
     # before the browser exists: it needs none, and its envelope decides whether the
@@ -2563,7 +2599,7 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
             tpl_last: dict = {}
 
             def attempt():
-                tpl_last["status"] = _proxy_pdf(page, doi, out, allow_nav=False)
+                tpl_last["status"] = _proxy_pdf(page, doi, out, allow_nav=False, route=route)
                 return _tpl_verdict(tpl_last["status"], sub, covered, suspect_unsub, doi)
         else:
             _log({"kind": "proxy", "doi": doi, "prefix": prefix, "phase": "n/a",
