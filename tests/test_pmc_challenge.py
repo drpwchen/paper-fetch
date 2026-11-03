@@ -92,3 +92,69 @@ def test_content_reject_beats_wall(monkeypatch):
     monkeypatch.setattr(pf, "SFX_BASE", None)
     env = pf.run_ladder("10.1/x", None)
     assert pf.exit_code(env) == 2
+
+
+# Synthetic pages shaped like what the two hosts served on 2026-11-03 (markers only — no real
+# captured HTML, no tokens): PMC = HTTP 200 proof-of-work page, Europe PMC = HTTP 403 Cloudflare.
+POW_PAGE = (b"\n\n<!DOCTYPE html><html><head><title>Preparing to download ...</title>"
+            b"<script>window.POW_CHALLENGE='x';window.POW_COOKIE_NAME='cloudpmc-viewer-pow';"
+            b"</script></head><body><main id=\"main\"></main></body></html>")
+CF_PAGE = (b"<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>"
+           b"<noscript><span id=\"challenge-error-text\">Enable JavaScript and cookies to "
+           b"continue</span></noscript><script>window._cf_chl_opt={};</script></body></html>")
+
+
+def serve_page(monkeypatch, page, status, has_pdf="Y"):
+    def get(url, **kw):
+        if "webservices/rest/search" in url:
+            return FakeResp(json_data=epmc_flag(has_pdf))
+        return FakeResp(status=status, content=page, url=url)
+    monkeypatch.setattr(pf.requests, "get", get)
+
+
+def test_pmc_pow_page_is_pmc_challenge(monkeypatch):
+    serve_page(monkeypatch, POW_PAGE, 200)
+    assert pf._grab(PMC_PDF) is None
+    assert pf._BLOCKED == [("pmc_challenge", PMC_PDF)]
+
+
+def test_pow_marker_counts_even_on_a_big_page():
+    big = POW_PAGE + b"<!--" + b"x" * 30_000 + b"-->"
+    assert pf.pmc_stub_kind(PMC_PDF, 200, big) == "pmc_challenge"
+
+
+def test_europepmc_cloudflare_403_is_pmc_challenge(monkeypatch):
+    serve_page(monkeypatch, CF_PAGE, 403)
+    assert pf._grab(EPMC_PDF) is None
+    assert pf._BLOCKED == [("pmc_challenge", EPMC_PDF)]
+
+
+def test_europepmc_cloudflare_403_with_haspdf_n_is_not_a_wall(monkeypatch):
+    serve_page(monkeypatch, CF_PAGE, 403, has_pdf="N")
+    assert pf._grab(EPMC_PDF) is None
+    assert pf._BLOCKED == []
+
+
+def test_cloudflare_off_pmc_keeps_generic_kind(monkeypatch):
+    serve_page(monkeypatch, CF_PAGE, 403)
+    assert pf._grab("https://journal.example.org/a.pdf") is None
+    assert pf._BLOCKED == [("cf_challenge", "https://journal.example.org/a.pdf")]
+
+
+def test_pmc_404_is_not_a_stub():
+    assert pf.pmc_stub_kind(PMC_PDF, 404, b"<html>" + b"x" * 40_000) is None
+
+
+def test_pmc_recaptcha_variant_over_size_limit_is_pmc_challenge(monkeypatch):
+    page = (b"<!DOCTYPE html><html><head><title>Checking your browser - reCAPTCHA</title>"
+            b"<script src=\"https://www.google.com/recaptcha/api.js\"></script></head><body>"
+            + b"<!--" + b"x" * 20_500 + b"--></body></html>")             # > _PMC_STUB_MAX
+    serve_page(monkeypatch, page, 200)
+    assert pf._grab(PMC_PDF) is None
+    assert pf._BLOCKED == [("pmc_challenge", PMC_PDF)]
+
+
+def test_pmc_host_challenge_with_haspdf_n_is_not_a_wall(monkeypatch):
+    serve_page(monkeypatch, POW_PAGE, 200, has_pdf="N")
+    assert pf._grab(PMC_PDF) is None
+    assert pf._BLOCKED == []

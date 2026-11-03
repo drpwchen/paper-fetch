@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] — 2026-11-03 — PMC challenge markers from a real capture; hasPDF=N behind a wall (issue #7)
+
+The 1.8.0 PMC classifier was built from sizes alone. A capture against the real hosts showed
+three page variants, one of them too big for the size rule, and a misclassification.
+
+### Fixed
+- **Europe PMC now answers scripts with a Cloudflare HTTP 403** ("Just a moment..."), not a
+  200 stub. It was already counted as a wall (`cf_challenge`) but bypassed the PMC handling, so
+  an article whose Europe PMC `hasPDF=N` (author manuscript, HTML only) exited `7` "blocked"
+  instead of the honest "no PDF". PMC hosts are now classified before the generic markers.
+- **PMC's own `/pdf/` path serves its challenge for `hasPDF=N` PMCIDs too** (to a browser
+  User-Agent; a plain one gets a 404). The `hasPDF` lookup now runs for both hosts.
+- **PMC's reCAPTCHA variant** ("Checking your browser - reCAPTCHA", 20.5 KB — just over the
+  20 KB stub limit) is `pmc_challenge` instead of the generic `recaptcha`, so the log names the
+  right fix (open the PDF URL itself in a real browser).
+
+### Changed
+- `pmc_stub_kind` recognises named markers — PMC's proof-of-work page (`POW_CHALLENGE`), the
+  reCAPTCHA title, Cloudflare's `_cf_chl_opt` / "just a moment" — at HTTP 200 or 403 and any
+  size. Without a marker the 1.8.0 shape rule (200 + small HTML) still applies.
+- Tests use minimal synthetic pages built from those markers; no captured HTML is committed.
+- AGENTS.md smoke-test note and docs/publisher-tdm-apis.md: PMC / Europe PMC no longer serve
+  PDFs to scripts; the smoke DOI now resolves to the Research Square preprint.
+
 ## [1.8.0] — 2026-11-03 — route by landing host for moved journals; PMC JS challenge is a wall (issue #7)
 
 Two ways a fetch said "no full text" when the full text was there.

@@ -162,6 +162,15 @@ def challenge_kind(content: bytes):
 _PMC_HOSTS = ("pmc.ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov", "europepmc.org",
               "www.europepmc.org")
 _PMC_STUB_MAX = 20_000     # a real PDF is never this small; an article HTML page is bigger
+# Markers seen 2026-11-03 (structure only, no tokens kept): PMC's PDF path answers HTTP 200 +
+# 1.8 KB titled "Preparing to download ..." running a proof-of-work script (`POW_CHALLENGE`,
+# `POW_COOKIE_NAME`; the cookie it sets is `cloudpmc-viewer-pow`); Europe PMC's render URL
+# answers HTTP 403 + 5.5 KB Cloudflare "Just a moment..." (`_cf_chl_opt`) — also for PMCIDs
+# whose hasPDF=N, so the hasPDF check must run before a Cloudflare page is called a wall.
+# Which PMC variant comes back depends on the User-Agent: a browser UA gets a 20.5 KB page
+# titled "Checking your browser - reCAPTCHA" — just over _PMC_STUB_MAX, hence a named marker.
+# The agent Edge passed both variants by navigating to the PDF URL.
+_PMC_MARKERS = (b"pow_challenge", b"checking your browser", b"_cf_chl_opt", b"just a moment")
 
 
 def _is_pmc_url(url) -> bool:
@@ -196,19 +205,26 @@ def pmc_stub_kind(url, status, content: bytes, final_url=None):
     """Classify a non-PDF answer from a PMC / Europe PMC PDF endpoint.
 
     Returns "pmc_challenge" (a JS challenge page — the PDF is behind it), "pmc_no_pdf"
-    (Europe PMC says it holds no PDF for this PMCID) or None (not a PMC stub)."""
-    if status != 200 or content[:4] == b"%PDF" or len(content) > _PMC_STUB_MAX:
-        return None
-    if not (_is_pmc_url(url) or _is_pmc_url(final_url)):
+    (Europe PMC says it holds no PDF for this PMCID) or None (not a PMC stub).
+    A named marker (`_PMC_MARKERS`) counts at HTTP 200 or 403; without one, only the shape
+    "HTTP 200 + small HTML" does (the 2026-10 classifier, kept for unseen variants)."""
+    if content[:4] == b"%PDF" or not (_is_pmc_url(url) or _is_pmc_url(final_url)):
         return None
     low = content[:_PMC_STUB_MAX].lower()
-    if b"<script" not in low and b"<html" not in low and b"<!doctype" not in low:
+    marked = any(m in low for m in _PMC_MARKERS)
+    if not marked:
+        if status != 200 or len(content) > _PMC_STUB_MAX:
+            return None
+        if b"<script" not in low and b"<html" not in low and b"<!doctype" not in low:
+            return None
+    elif status not in (200, 403):
         return None
     both = f"{url} {final_url or ''}"
     m = re.search(r"(PMC\d+)", both, re.I)
-    if m and "europepmc" in both.lower():
-        if _europepmc_has_pdf(m.group(1).upper()) is False:
-            return "pmc_no_pdf"
+    # Both hosts: with a browser UA, PMC's own /pdf/ also serves its challenge for a PMCID that
+    # has no PDF at all (PMC8670983, author manuscript, 2026-11-03; a plain UA got a 404).
+    if m and _europepmc_has_pdf(m.group(1).upper()) is False:
+        return "pmc_no_pdf"
     return "pmc_challenge"
 
 
@@ -633,13 +649,16 @@ def _grab(url, referer=None):
         time.sleep(_RETRY_5XX_WAIT_S)
     if r.status_code == 200 and valid_pdf(r.content):
         return r.content
-    kind = challenge_kind(r.content) if r.content[:4] != b"%PDF" else None
-    if not kind:
-        pmc = pmc_stub_kind(url, r.status_code, r.content, getattr(r, "url", None))
-        if pmc == "pmc_no_pdf":
-            print("  Europe PMC hasPDF=N：這篇在 PMC 只有 HTML 全文（作者稿），沒有 PDF 可抓")
-        elif pmc:
-            kind = pmc
+    # PMC hosts first: Europe PMC's Cloudflare page must not be called a wall when its own
+    # hasPDF=N says there is no PDF behind it (2026-11-03).
+    pmc = pmc_stub_kind(url, r.status_code, r.content, getattr(r, "url", None))
+    if pmc == "pmc_no_pdf":
+        print("  Europe PMC hasPDF=N：這篇在 PMC 只有 HTML 全文（作者稿），沒有 PDF 可抓")
+        kind = None
+    elif pmc:
+        kind = pmc
+    else:
+        kind = challenge_kind(r.content) if r.content[:4] != b"%PDF" else None
     if kind == "pmc_challenge":
         _BLOCKED.append((kind, url))
         print(f"  ✗ PMC／Europe PMC 回的是 JS challenge 頁（{len(r.content)} bytes HTML），"

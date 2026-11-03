@@ -28,7 +28,9 @@ reading end is `claude-paper-tools`, the discovery end is `paper-radar`.
    ```
    If that fails, the problem is config or network, not the library. Fix it here, not later.
    (Expected log since 2026-09: the Springer direct link comes back `js_challenge` — that is
-   the publisher's bot wall, not your config — and the PDF arrives from Europe PMC.)
+   the publisher's bot wall, not your config. Since 2026-10 PMC and Europe PMC wall scripts
+   too (`pmc_challenge`), so the PDF arrives from another OA copy — on 2026-11-03 the Research
+   Square preprint, which `--title` accepts at 65 % because the preprint's title differs.)
 5. Only then the proxy layer. As of v1.0 all route code (including the full LWW/Ovid flow)
    ships working — what remains is authentication config: set `auth.family: form` and point
    the selectors in `config.yaml` at the gate's login form (inspect it in devtools; EZproxy
@@ -117,6 +119,11 @@ PDF".** `pmc.ncbi.nlm.nih.gov/articles/PMC…/pdf/` (~1.8 KB) and `europepmc.org
 and exits `7`. A real browser passes only by navigating to the **PDF URL itself** and fetching
 it from inside that page — opening the article page first is not enough. The one honest
 "no PDF" is Europe PMC's own `hasPDF=N` (author manuscript as HTML only), which is checked.
+Re-captured 2026-11-03 (1.8.1): the page depends on host and User-Agent — PMC sends a
+proof-of-work page (`POW_CHALLENGE`, 1.8 KB) or, to a browser UA, "Checking your browser -
+reCAPTCHA" (20.5 KB); Europe PMC sends a Cloudflare **403** "Just a moment...". All three are
+`pmc_challenge`, and both hosts serve them even for a `hasPDF=N` PMCID — so `hasPDF` is looked
+up before any of them is called a wall.
 
 ## Calling it from an orchestrator
 

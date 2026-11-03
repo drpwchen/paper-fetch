@@ -79,7 +79,7 @@ import requests
 
 from paper_config import CFG
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 _R = {
     "subreddit": "Scholar",
     "state_dir": "",
