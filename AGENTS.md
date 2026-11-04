@@ -29,8 +29,10 @@ reading end is `claude-paper-tools`, the discovery end is `paper-radar`.
    If that fails, the problem is config or network, not the library. Fix it here, not later.
    (Expected log since 2026-09: the Springer direct link comes back `js_challenge` — that is
    the publisher's bot wall, not your config. Since 2026-10 PMC and Europe PMC wall scripts
-   too (`pmc_challenge`), so the PDF arrives from another OA copy — on 2026-11-03 the Research
-   Square preprint, which `--title` accepts at 65 % because the preprint's title differs.)
+   too (`pmc_challenge`), so the PDF arrives from another OA copy — the Research Square
+   preprint, which `--title` accepts at 65 %. Since 1.9.0 that is reported as what it is:
+   exit `0`, saved as `out.preprint.pdf`, envelope `version: "preprint"`, and the walled PMC /
+   publisher URLs listed in `vor_blocked`. That output is the expected smoke result, not a bug.)
 5. Only then the proxy layer. As of v1.0 all route code (including the full LWW/Ovid flow)
    ships working — what remains is authentication config: set `auth.family: form` and point
    the selectors in `config.yaml` at the gate's login form (inspect it in devtools; EZproxy
@@ -129,7 +131,7 @@ up before any of them is called a wall.
 
 - `paper_fetch.py --json <DOI> <out>` prints **exactly one JSON envelope on stdout** (all
   diagnostics go to stderr): `{schema, doi, ok, route, tried[], bytes, sha256, path,
-  resolver_url?, elapsed_s}`. Parse that; do not scrape logs.
+  resolver_url?, version?, elapsed_s}`. Parse that; do not scrape logs.
 - **Exit codes** (same table for both scripts): `0` PDF obtained · `1` usage error · `2` a route
   ran and came back empty · `3` **auth failed / session expired** · `4` profile busy · `5`
   watchdog abort · `6` no route for this publisher prefix · `7` **blocked** — every attempt
@@ -139,6 +141,11 @@ up before any of them is called a wall.
   retry" — recording any of them as unavailable is the easiest way to wrongly write a paper
   off. `7` in particular used to be `2`: Springer's JS challenge on a *subscribed* article
   was being logged as "route ran, came back empty".
+- **Exit `0` does not mean "version of record".** Read `version` (since 1.9.0): `preprint` /
+  `accepted` are saved as `<stem>.preprint.pdf` / `<stem>.accepted.pdf`, not under the requested
+  name, with `vor_url`, `vor_blocked` (walled VoR candidates — hand them to the user to open in
+  a browser) and `zotero_attachment_title`. `null` = nothing said which version it is. A
+  systematic review must not file a preprint as the published article.
 - **With `--title`, exit `0` also means "verified to be this article".** A PDF whose first
   pages do not carry the title is moved to `<stem>.rejected.pdf` and the ladder continues; if
   nothing better turns up the run is non-zero and the envelope says `rejected_path`. Do not

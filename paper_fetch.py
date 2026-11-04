@@ -17,7 +17,12 @@ Exit codes（與 library_session.py 同一張表）: 0=拿到有效 PDF · 1=用
 JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_url?,
                 partial_path?, reject_reason?, oa_claimed?, free_at_publisher?, blocked_by?[],
                 verify?, verify_detail?, volume_path?, extracted_pages?,
-                rejected_path?, rejected_route?, reddit_draft?, elapsed_s}
+                rejected_path?, rejected_route?, reddit_draft?, version?, version_basis?,
+                source_url?, vor_url?, vor_blocked?[], zotero_attachment_title?, elapsed_s}
+`version`（只在成功時，1.9.0）：published／accepted（作者接受稿）／preprint／null（不知道）。
+==preprint 與 accepted 仍是 exit 0==，但檔案存成 `<stem>.preprint.pdf`／`<stem>.accepted.pdf`
+（不在要求的檔名下；`path` 是實際位置）、envelope 附 `vor_url`、`vor_blocked`（擋住正式版的
+bot 牆網址，用自己的瀏覽器開）與 `zotero_attachment_title`。判斷順序見 classify_version。
 `reddit_draft`（只在失敗時）：r/Scholar 求文草稿（reddit_request.py），==只是草稿、不會發==；
 OA／bot 牆／PubMed free 的文章給 {"refused": …}——那些該走 layer 2 的瀏覽器，不是去跟人要。
 `blocked_by` 列出被 bot 牆（js_challenge / recaptcha / cf_*）擋掉的候選 URL——有它就代表
@@ -130,6 +135,120 @@ _FREE_AT_PUBLISHER = None   # PubMed's `free full text[sb]` verdict for this DOI
                             # / unknown). Unpaywall says `closed` for plenty of articles the
                             # publisher gives away (Annals GRADE guidance, Minerva EJPRM — both
                             # 2026-09-06); PubMed's flag is the index that knows.
+_SOURCE = None       # (url, unpaywall_version) of the OA candidate that produced the PDF
+_LAST_GRAB_URL = None   # final URL (after redirects) of the last response accepted as a PDF
+
+
+# --- which VERSION of the article is this PDF? (1.9.0) -----------------------------------
+# Why (2026-11-03/04): the smoke DOI 10.1186/s12984-023-01168-x has its published PDF on PMC
+# and Europe PMC, both of which now wall scripts, so the ladder saved the Research Square
+# PREPRINT — and `--title` passed it (65 %) because the titles are near-identical. Exit 0,
+# "✓ PDF 已存", nothing to tell the user it was not the version of record (VoR).
+#
+# Evidence, in order:
+#   1. The URL is on a preprint server (or is a doi.org link to a preprint-server DOI) →
+#      preprint. A preprint server hosts nothing else, so this beats Unpaywall's `version`:
+#      Unpaywall labels that very Research Square copy `acceptedVersion` (checked 2026-11-04).
+#   2. Unpaywall's `version` for the oa_location the PDF came from: publishedVersion →
+#      published, acceptedVersion → accepted (author accepted manuscript), submittedVersion →
+#      preprint.
+#   3. A publisher TDM / publisher-landing route → published.
+#   Nothing else known → None ("unknown"): no label, no rename — the pre-1.9.0 behaviour.
+PREPRINT_HOSTS = (
+    "researchsquare.com", "biorxiv.org", "medrxiv.org", "arxiv.org", "ssrn.com",
+    "preprints.org", "osf.io", "psyarxiv.com", "chemrxiv.org", "techrxiv.org",
+    "authorea.com", "sportrxiv.org", "eartharxiv.org", "engrxiv.org",
+)
+PREPRINT_DOI_PREFIXES = (
+    "10.21203/",   # Research Square
+    "10.48550/",   # arXiv
+    "10.2139/",    # SSRN
+    "10.20944/",   # Preprints.org
+    "10.31219/", "10.31234/", "10.31235/", "10.31236/",   # OSF Preprints / PsyArXiv / SocArXiv / …
+    "10.26434/",   # ChemRxiv
+    "10.36227/",   # TechRxiv
+    "10.22541/",   # Authorea
+    "10.51224/",   # SportRxiv
+)
+# bioRxiv / medRxiv share 10.1101 with Cold Spring Harbor's journals (Genome Res 10.1101/gr.…):
+# only the date-shaped (2019+) or bare-number (older) suffix is a preprint.
+_RXIV_DOI = re.compile(r"^10\.1101/(\d{4}\.\d{2}\.\d{2}\.\d+|\d{5,7})(v\d+)?$")
+_UNPAYWALL_VERSION = {"publishedVersion": "published", "acceptedVersion": "accepted",
+                      "submittedVersion": "preprint"}
+NON_VOR = ("preprint", "accepted")
+ZOTERO_TITLE = {"preprint": "Preprint PDF — not the version of record",
+                "accepted": "Accepted Manuscript PDF — not the version of record"}
+_VERSION_ZH = {"preprint": "預印本（preprint）", "accepted": "作者接受稿（accepted manuscript）"}
+
+
+def is_preprint_doi(doi) -> bool:
+    d = (doi or "").strip().lower()
+    return d.startswith(PREPRINT_DOI_PREFIXES) or bool(_RXIV_DOI.match(d))
+
+
+def preprint_host(url):
+    """The preprint server `url` points at — a host, or a doi.org link to its DOI — else None."""
+    if not url:
+        return None
+    low = url.strip().lower()
+    host = re.sub(r"^https?://", "", low).split("/")[0].split(":")[0]
+    for h in PREPRINT_HOSTS:
+        if host == h or host.endswith("." + h):
+            return h
+    m = re.match(r"^https?://(?:dx\.)?doi\.org/(10\.[^?#\s]+)", low)
+    if m and is_preprint_doi(m.group(1)):
+        return "doi:" + m.group(1).split("/")[0]
+    return None
+
+
+def classify_version(urls, unpaywall_version=None):
+    """→ (version, basis): version ∈ published / accepted / preprint / None (unknown).
+
+    `urls`: every URL the PDF is known by (candidate, final URL after redirects). See the
+    evidence order above — a preprint host wins over Unpaywall's `version`."""
+    for u in urls:
+        h = preprint_host(u)
+        if h:
+            return "preprint", f"host:{h}"
+    v = _UNPAYWALL_VERSION.get(unpaywall_version or "")
+    if v:
+        return v, f"unpaywall:{unpaywall_version}"
+    return None, None
+
+
+def version_of(route_name, source=None, final_url=None):
+    """Version of the PDF a route returned. TDM / publisher-landing routes are the VoR unless
+    the final URL says otherwise; the OA route is judged per candidate (`_SOURCE`)."""
+    url, upw = source or (None, None)
+    urls = [u for u in (url, final_url) if u]
+    version, basis = classify_version(urls, upw)
+    if version is None and route_name not in ("unpaywall",):
+        return "published", f"route:{route_name}"
+    return version, basis
+
+
+_RANK = {"published": 0, None: 1, "accepted": 2, "preprint": 3}
+
+
+def _version_rank(url, unpaywall_version=None) -> int:
+    """Sort key for OA candidates: VoR, unknown, accepted manuscript, preprint."""
+    return _RANK[classify_version([url], unpaywall_version)[0]]
+
+
+def labeled_path(out: pathlib.Path, version) -> pathlib.Path:
+    """`<stem>.preprint.pdf` / `<stem>.accepted.pdf` — the filename says what it is."""
+    return out.with_name(f"{out.stem}.{version}{out.suffix or '.pdf'}")
+
+
+def vor_walls(blocked):
+    """Bot-walled candidates that may hold the version of record (preprint hosts dropped)."""
+    seen, res = set(), []
+    for kind, url in blocked:
+        if url in seen or preprint_host(url):
+            continue
+        seen.add(url)
+        res.append({"kind": kind, "url": url})
+    return res
 
 
 # Bot walls that answer a PDF URL with HTTP 200 + a small HTML page (issue #3). Each is a
@@ -549,14 +668,22 @@ def route_unpaywall(doi):
     ②PMC 落地頁轉 Europe PMC render 端點（PMC 已上 reCAPTCHA 擋 bot）；
     ③本地 db oa_pdf_url 兜底；④落地頁抓 citation_pdf_url meta（涵蓋機構 repository）。
     """
+    global _SOURCE
     candidates = []   # 直連 PDF 候選（依序、去重）
     landings = []     # 落地頁候選（最後才試 meta / 直接是 PDF）
+    upw_version = {}  # url → Unpaywall `version` of the oa_location it came from (1.9.0)
 
-    def add_pdf(u):
+    def note_version(u, v):
+        if u and v and u not in upw_version:
+            upw_version[u] = v
+
+    def add_pdf(u, v=None):
+        note_version(u, v)
         if u and u not in candidates:
             candidates.append(u)
 
-    def add_landing(u):
+    def add_landing(u, v=None):
+        note_version(u, v)
         if u and u not in landings:
             landings.append(u)
 
@@ -579,10 +706,11 @@ def route_unpaywall(doi):
                 for loc in locs:
                     if not loc:
                         continue
-                    add_pdf(loc.get("url_for_pdf"))
-                    add_pdf(_pmc_render_url(loc.get("url_for_pdf")))
-                    add_pdf(_pmc_render_url(loc.get("url")))
-                    add_landing(loc.get("url"))
+                    v = loc.get("version")
+                    add_pdf(loc.get("url_for_pdf"), v)
+                    add_pdf(_pmc_render_url(loc.get("url_for_pdf")), v)
+                    add_pdf(_pmc_render_url(loc.get("url")), v)
+                    add_landing(loc.get("url"), v)
                 if not locs:
                     print(f"  Unpaywall: is_oa={j.get('is_oa')} oa_status={j.get('oa_status')} · 無 OA location")
             else:
@@ -610,14 +738,22 @@ def route_unpaywall(doi):
         print("  OA: 無任何候選 URL")
         return None
 
+    # Version of record first, preprints last (stable within a rank). Unpaywall lists the
+    # Research Square copy BEFORE the PMC one for the smoke DOI: the preprint won, and the
+    # walled PMC copy — the URL a user needs to open by hand — was never even tried.
+    candidates.sort(key=lambda u: _version_rank(u, upw_version.get(u)))
+    landings.sort(key=lambda u: _version_rank(u, upw_version.get(u)))
     for u in candidates:
-        print(f"  OA 候選 PDF: {u}")
+        print(f"  OA 候選 PDF: {u}"
+              + (f"（Unpaywall version={upw_version[u]}）" if u in upw_version else ""))
         pdf = _grab(u)
         if pdf:
+            _SOURCE = (u, upw_version.get(u))
             return pdf
     for u in landings:
         pdf = _grab_via_landing(u)
         if pdf:
+            _SOURCE = (u, upw_version.get(u))
             return pdf
     print("  OA: 所有候選皆未取得有效 PDF")
     return None
@@ -648,6 +784,8 @@ def _grab(url, referer=None):
         print(f"  HTTP {r.status_code} 多半是暫時的 → {_RETRY_5XX_WAIT_S} s 後重試一次")
         time.sleep(_RETRY_5XX_WAIT_S)
     if r.status_code == 200 and valid_pdf(r.content):
+        global _LAST_GRAB_URL
+        _LAST_GRAB_URL = getattr(r, "url", None) or url
         return r.content
     # PMC hosts first: Europe PMC's Cloudflare page must not be called a wall when its own
     # hasPDF=N says there is no PDF behind it (2026-11-03).
@@ -679,6 +817,8 @@ def _grab_via_landing(url):
         print(f"  落地頁失敗 {url}: {e}")
         return None
     if r.status_code == 200 and valid_pdf(r.content):
+        global _LAST_GRAB_URL
+        _LAST_GRAB_URL = getattr(r, "url", None) or url
         print(f"  落地頁本身即 PDF: {url} · {len(r.content)} bytes")
         return r.content
     kind = challenge_kind(r.content) if r.content[:4] != b"%PDF" else None
@@ -878,6 +1018,26 @@ def _rejected_path(out: pathlib.Path) -> pathlib.Path:
     return out.with_name(out.stem + ".rejected.pdf")
 
 
+def _non_vor_notice(doi, version, basis, source_url, path):
+    """Say loudly that the PDF is a preprint / accepted manuscript, and where the version of
+    record was walled off. Returns the envelope fields (exit code stays 0)."""
+    walls = vor_walls(_BLOCKED)
+    vor_url = f"https://doi.org/{doi}"
+    zh = _VERSION_ZH[version]
+    print(f"\n⚠ 這份是{zh}，不是正式出版版本（version of record）。")
+    print(f"  判斷依據：{basis}；來源：{source_url}")
+    if path:
+        print(f"  檔名已標示 → {pathlib.Path(path).name}")
+    print(f"  放進 Zotero 時把附件標題設成：「{ZOTERO_TITLE[version]}」")
+    if walls:
+        print("  正式版被 bot 牆擋在這些網址（腳本過不了，用自己的瀏覽器開；PMC 要直接開 PDF 網址本身）：")
+        for w in walls:
+            print(f"    [{w['kind']}] {w['url']}")
+    print(f"  出版社頁面（正式版）：{vor_url}")
+    return {"vor_url": vor_url, "vor_blocked": walls,
+            "zotero_attachment_title": ZOTERO_TITLE[version]}
+
+
 def run_ladder(doi, out, title=None):
     """Walk the route ladder. Returns an envelope dict (also the --json payload).
 
@@ -888,6 +1048,7 @@ def run_ladder(doi, out, title=None):
       2 = every automatic route exhausted — envelope carries the resolver link
       7 = nothing but bot walls answered (envelope `blocked`) — not evidence about the paper
     """
+    global _SOURCE, _LAST_GRAB_URL
     started = time.time()
     tried = []
     title_reject = None   # (route, info) of a PDF that verified as NOT this article
@@ -895,6 +1056,7 @@ def run_ladder(doi, out, title=None):
         name = route.__name__.removeprefix("route_")
         print(f"→ 試 {name}")
         tried.append(name)
+        _SOURCE = _LAST_GRAB_URL = None
         pdf = route(doi)
         if pdf:
             path = None
@@ -907,8 +1069,18 @@ def run_ladder(doi, out, title=None):
                 # caller. Keep walking — the next rung may hold the real one (issue #6).
                 title_reject = (name, checked)
                 continue
+            # The candidate URL (stable) over the redirect target (often a signed asset URL).
+            source_url = (_SOURCE[0] if _SOURCE else None) or _LAST_GRAB_URL
+            version, basis = version_of(name, _SOURCE, _LAST_GRAB_URL)
+            # A preprint DOI asked for is a preprint delivered: truthful, nothing to warn about.
+            non_vor = version in NON_VOR and not is_preprint_doi(doi)
+            data = out.read_bytes() if (path and checked.get("extracted_pages")) else pdf
+            if non_vor and out:
+                labeled = labeled_path(out, version)
+                out.replace(labeled)
+                path = str(labeled)
             if out:
-                print(f"✓ PDF 已存 → {out} ({len(pdf)} bytes)")
+                print(f"✓ PDF 已存 → {path} ({len(data)} bytes)")
                 print("  下一步：把此 PDF 拖進對應 Zotero item，ZotMoov 會自動搬到 linked-files 資料夾並轉 linked。")
                 if title_reject and title_reject[1].get("rejected_path"):
                     with contextlib.suppress(OSError):    # superseded by the verified article
@@ -916,13 +1088,13 @@ def run_ladder(doi, out, title=None):
             else:
                 print(f"✓ 抓到有效 PDF（{len(pdf)} bytes）；未指定輸出檔，未存。")
             env = {"schema": 1, "doi": doi, "ok": True, "route": name,
-                   "tried": tried, "bytes": len(pdf),
-                   "sha256": hashlib.sha256(pdf).hexdigest(), "path": path,
+                   "tried": tried, "bytes": len(data),
+                   "sha256": hashlib.sha256(data).hexdigest(), "path": path,
+                   "version": version, "version_basis": basis, "source_url": source_url,
                    "elapsed_s": round(time.time() - started, 1)}
-            if path and checked.get("extracted_pages"):   # 切過了 → 重算實際檔案的指紋
-                data = out.read_bytes()
-                env.update({"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
             env.update(checked)
+            if non_vor:
+                env.update(_non_vor_notice(doi, version, basis, source_url, path))
             return env
 
     # 全部失敗 → 機構 SFX 連結

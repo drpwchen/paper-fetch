@@ -1287,10 +1287,23 @@ def _try_paper_fetch(doi: str, out: Path, title: str | None = None) -> bool:
         _L1_ENV = json.loads([ln for ln in (r.stdout or "").splitlines() if ln.strip()][-1])
     except Exception:
         _L1_ENV = {}
-    ok = _is_pdf(out)
+    got = out
+    # 1.9.0: a preprint / accepted manuscript is saved as <stem>.preprint.pdf / .accepted.pdf,
+    # not under the requested name — the envelope's `path` says where.
+    if not _is_pdf(out) and _L1_ENV.get("ok") and _L1_ENV.get("path"):
+        got = Path(_L1_ENV["path"])
+    ok = _is_pdf(got)
     if ok:
-        _log({"kind": "api", "doi": doi, "status": "pdf", "bytes": out.stat().st_size,
-              "route": _L1_ENV.get("route")})
+        _log({"kind": "api", "doi": doi, "status": "pdf", "bytes": got.stat().st_size,
+              "route": _L1_ENV.get("route"), "version": _L1_ENV.get("version")})
+        if _L1_ENV.get("vor_url"):
+            print(f"[paper_fetch] ⚠ layer 1 got a {_L1_ENV.get('version')} — NOT the version of "
+                  f"record ({_L1_ENV.get('version_basis')}) → {got}", file=sys.stderr)
+            for w in _L1_ENV.get("vor_blocked") or []:
+                print(f"[paper_fetch]   VoR behind a bot wall [{w.get('kind')}]: {w.get('url')}"
+                      " — open it in your own browser", file=sys.stderr)
+            print(f"[paper_fetch]   Zotero attachment title: "
+                  f"{_L1_ENV.get('zotero_attachment_title')}", file=sys.stderr)
     else:
         # Surface WHY the OA/TDM ladder came back empty — swallowing it hides route
         # diagnostics (which OA candidates were tried, missing-token hints, resolver link).
@@ -2496,7 +2509,8 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
               file=sys.stderr)
         _log({"kind": "api", "doi": doi, "status": "skipped"})
     elif _try_paper_fetch(doi, out, title):
-        print(f"[fetch] got via API/OA/TDM route -> {out}", file=sys.stderr)
+        print(f"[fetch] got via API/OA/TDM route -> {_L1_ENV.get('path') or out}",
+              file=sys.stderr)
         return "ok"
     direct_why = []
     if _L1_ENV.get("free_at_publisher"):

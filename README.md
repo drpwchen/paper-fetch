@@ -213,6 +213,8 @@ to stderr), so an orchestrator can `json.loads` the last line without scraping l
 
 On failure `ok` is `false`, `tried` lists every route attempted, and `resolver_url` carries
 your library's SFX link for a manual finish. `sha256` lets batch callers dedupe.
+On success `version` says which version of the article the PDF is (see "Preprint or version of
+record?" below); a `preprint` / `accepted` file is saved under a labelled name.
 
 ### Exit codes (one table for both scripts)
 
@@ -257,6 +259,27 @@ carry the title (`title_absent`) is **not** left under the requested name — it
 `<stem>.rejected.pdf`, the ladder keeps going (the institutional route then found the real
 article), and the run does not exit `0`. The envelope carries `rejected_path`. Open the file if
 you want to know what it was; rename it back only if you can see it *is* the article.
+
+### Preprint or version of record?
+
+A title check cannot tell a preprint from the published article either: the titles are usually
+near-identical. Since 1.9.0 every successful envelope carries `version` — `published`,
+`accepted` (author accepted manuscript), `preprint`, or `null` when nothing says. The evidence,
+in order: the PDF came from a **preprint server** (Research Square, bioRxiv/medRxiv, arXiv,
+SSRN, Preprints.org, OSF, …, by host or by a doi.org link to the server's DOI prefix) →
+`preprint`, even when Unpaywall says otherwise (it calls a Research Square copy
+`acceptedVersion`); then Unpaywall's own `version` for the location the PDF came from; then a
+publisher TDM / landing route → `published`. Within the OA route the version-of-record copies
+are tried first and preprints last.
+
+A `preprint` or `accepted` result still exits `0`, but it is **not** saved under the requested
+name: it becomes `<stem>.preprint.pdf` / `<stem>.accepted.pdf` (the envelope `path` says where),
+the log says so, and the envelope adds `vor_url` (doi.org), `vor_blocked` (the walled candidates
+that may hold the version of record — open those in your own browser; for PMC open the PDF URL
+itself) and `zotero_attachment_title` (`Preprint PDF — not the version of record` — set it as
+the attachment's title, since Zotero may rename the file). A caller that keys success on "a file
+exists under the name I asked for" will now see a preprint as missing — read `path` and
+`version` instead. Asking for a preprint's own DOI gets no warning and no rename.
 
 ### When every route fails: an r/Scholar request (drafted, never posted)
 

@@ -5,6 +5,41 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] — 2026-11-04 — a preprint is labelled as a preprint, not passed off as the article
+
+The smoke DOI `10.1186/s12984-023-01168-x` exited `0` with a PDF that was the Research Square
+**preprint**: the published copies (BMC, PMC, Europe PMC) all wall scripts now, and `--title`
+accepted the preprint at 65 % because the titles are near-identical. Nothing in the output said
+it was not the version of record.
+
+### Added
+- **`version` in every successful envelope**: `published` / `accepted` (author accepted
+  manuscript) / `preprint` / `null` (unknown), with `version_basis` and `source_url`. Evidence
+  order: a preprint-server host (Research Square, bioRxiv/medRxiv, arXiv, SSRN, Preprints.org,
+  OSF family, ChemRxiv, TechRxiv, Authorea, SportRxiv, …) or a doi.org link to a preprint-server
+  DOI prefix → `preprint`; else Unpaywall's `version` for the oa_location the PDF came from;
+  else a publisher TDM / landing route → `published`. The host wins over Unpaywall because
+  Unpaywall labels this very Research Square copy `acceptedVersion`. bioRxiv/medRxiv are told
+  apart from Cold Spring Harbor journals on the shared `10.1101` prefix by DOI shape.
+- For `preprint` / `accepted`: the log says so in plain words, the envelope adds `vor_url`,
+  `vor_blocked` (bot-walled candidates that may hold the version of record — PMC, Europe PMC,
+  the publisher; open them in your own browser) and `zotero_attachment_title`
+  (`Preprint PDF — not the version of record` / `Accepted Manuscript PDF — …`).
+- Tests: `tests/test_version_label.py` (no network).
+
+### Changed
+- **A `preprint` / `accepted` PDF is saved as `<stem>.preprint.pdf` / `<stem>.accepted.pdf`**,
+  not under the requested name; exit stays `0` and the envelope `path` points at the file.
+  Callers that key success on "the requested file exists" will see such a result as missing —
+  deliberately the conservative reading; read `path` and `version`. `library_session.py`'s
+  layer 1 reads `path`, so it still reports `ok` and prints the label. Asking for a preprint's
+  own DOI is not a warning and is not renamed. Unknown version keeps the requested name.
+- **OA candidates are tried version-of-record first**, then unknown, accepted manuscript,
+  preprint (stable within a rank). Unpaywall listed the Research Square copy before PMC, so the
+  walled PMC URL — the one the user needs — was never tried and could not be reported.
+- Publisher-route (VoR) downloads are otherwise unchanged: same file name, same output, plus
+  `version: "published"` in the envelope.
+
 ## [1.8.1] — 2026-11-03 — PMC challenge markers from a real capture; hasPDF=N behind a wall (issue #7)
 
 The 1.8.0 PMC classifier was built from sizes alone. A capture against the real hosts showed
