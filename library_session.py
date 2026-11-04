@@ -2467,8 +2467,42 @@ def _content_check(out: Path, title: str | None, doi: str | None = None) -> bool
     return True
 
 
+_L1_NON_VOR: Path | None = None   # layer 1's preprint / accepted-manuscript file, if any
+
+
 def run_fetch(pw, doi: str, out: Path, title: str | None = None,
               skip_layer1: bool = False, force_direct: bool = False) -> str:
+    """The ladder (`_fetch_ladder`), plus what to do when layer 1 found only a preprint or an
+    accepted manuscript (1.10.0, user ruling 2026-11-04): the ladder carries on to the direct
+    and institutional routes for the version of record. Got it → the VoR is `out` and the
+    preprint file (a re-downloadable OA copy, superseded by a verified PDF) is deleted. Not
+    got → the layer-1 file stays, still labelled, and the result is "ok" — exactly the 1.9.0
+    outcome, plus a line naming why the VoR attempt failed."""
+    global _L1_NON_VOR
+    _L1_NON_VOR = None
+    reason = _fetch_ladder(pw, doi, out, title, skip_layer1, force_direct)
+    pre = _L1_NON_VOR
+    if pre is None:
+        return reason
+    version = _L1_ENV.get("version")
+    if reason == "ok" and _is_pdf(out):
+        print(f"[fetch] version of record obtained -> {out}; the layer-1 {version} "
+              f"({pre.name}) is superseded and removed", file=sys.stderr)
+        with contextlib.suppress(OSError):
+            pre.unlink()
+        _log({"kind": "vor_upgrade", "doi": doi, "status": "pdf", "from": version})
+        return "ok"
+    print(f"[fetch] the direct / institutional routes did not get the version of record "
+          f"({reason}) → keeping the layer-1 {version}: {pre} — NOT the version of record",
+          file=sys.stderr)
+    for w in _L1_ENV.get("vor_blocked") or []:
+        print(f"[fetch]   VoR behind a bot wall [{w.get('kind')}]: {w.get('url')}", file=sys.stderr)
+    _log({"kind": "vor_upgrade", "doi": doi, "status": reason, "from": version})
+    return "ok"
+
+
+def _fetch_ladder(pw, doi: str, out: Path, title: str | None = None,
+                  skip_layer1: bool = False, force_direct: bool = False) -> str:
     """Ladder: ① paper_fetch's API/OA/TDM (no proxy) → ①½ the direct route (a real browser
     straight to the publisher, no proxy/login) when ① reports the article is free but a
     script was walled off → ② holdings entitlement pre-check → ③ dispatch the proxy route
@@ -2494,7 +2528,7 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
     `is_logged_in` (the gate page) can report VALID while the per-subdomain proxy
     authorization has separately expired → the proxy returns an auth page. So any proxy
     "auth" failure forces one fresh login + retry."""
-    global _LAST_WALL
+    global _LAST_WALL, _L1_NON_VOR
     _LAST_WALL = None
     prefix = doi.split("/")[0]
     # Unknown prefix ≠ no route, and a known prefix ≠ the right route: the journal may live
@@ -2509,10 +2543,20 @@ def run_fetch(pw, doi: str, out: Path, title: str | None = None,
               file=sys.stderr)
         _log({"kind": "api", "doi": doi, "status": "skipped"})
     elif _try_paper_fetch(doi, out, title):
-        print(f"[fetch] got via API/OA/TDM route -> {_L1_ENV.get('path') or out}",
-              file=sys.stderr)
-        return "ok"
+        got = Path(_L1_ENV.get("path") or out)
+        if not _L1_ENV.get("vor_url"):
+            print(f"[fetch] got via API/OA/TDM route -> {got}", file=sys.stderr)
+            return "ok"
+        # A preprint / accepted manuscript (1.10.0): keep it as the fallback, go on for the
+        # VoR. Layer 1 already tried the prefix's TDM API and every OA copy — those are not
+        # repeated; what follows (direct browser, proxy route) never ran.
+        _L1_NON_VOR = got
+        print(f"[fetch] layer 1 got only a {_L1_ENV.get('version')} -> {got}; trying the "
+              f"direct / institutional routes for the version of record", file=sys.stderr)
     direct_why = []
+    if _L1_NON_VOR and _L1_ENV.get("vor_blocked"):
+        direct_why.append("layer 1 got only a preprint and the version of record is behind "
+                          "a bot wall")
     if _L1_ENV.get("free_at_publisher"):
         direct_why.append("PubMed flags it free full text")
     if _L1_ENV.get("blocked_by"):

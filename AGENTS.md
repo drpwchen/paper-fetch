@@ -145,7 +145,9 @@ up before any of them is called a wall.
   `accepted` are saved as `<stem>.preprint.pdf` / `<stem>.accepted.pdf`, not under the requested
   name, with `vor_url`, `vor_blocked` (walled VoR candidates — hand them to the user to open in
   a browser) and `zotero_attachment_title`. `null` = nothing said which version it is. A
-  systematic review must not file a preprint as the published article.
+  systematic review must not file a preprint as the published article. `library_session.py
+  fetch` (1.10.0) carries on after a layer-1 preprint to the direct and proxy routes; the
+  preprint is replaced (and deleted) only by a verified VoR, otherwise kept, still exit `0`.
 - **With `--title`, exit `0` also means "verified to be this article".** A PDF whose first
   pages do not carry the title is moved to `<stem>.rejected.pdf` and the ladder continues; if
   nothing better turns up the run is non-zero and the envelope says `rejected_path`. Do not

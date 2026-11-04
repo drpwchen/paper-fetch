@@ -5,7 +5,29 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.9.0] — 2026-11-04 — a preprint is labelled as a preprint, not passed off as the article
+## [1.10.0] — 2026-11-04 — after a layer-1 preprint, `library_session.py` goes on for the version of record
+
+1.9.0 labelled the preprint honestly, but `library_session.py fetch` still stopped at it: the
+direct browser route and the institutional proxy route — the ones that can get past the walls
+in front of the published copies — never ran.
+
+### Changed
+- **`library_session.py fetch`: a layer-1 `preprint` / `accepted` result no longer ends the
+  ladder.** Layer 1 already tried the prefix's TDM API and every OA copy, so those are not
+  repeated; the ladder continues with the direct route (a real browser to the publisher, now
+  also triggered when the version of record sat behind a bot wall) and then the institutional
+  proxy route, exactly as for a layer-1 failure.
+  - Version of record obtained (and content-checked) → it is `<out>`, exit `0`, and the
+    preprint file is deleted (a re-downloadable OA copy, superseded by a verified PDF; logged
+    `vor_upgrade`).
+  - Not obtained (blocked / auth / no route / fail) → the labelled `<stem>.preprint.pdf` stays,
+    exit `0` as in 1.9.0, plus a line naming why the version-of-record attempt failed and the
+    walled URLs. A dead library session therefore no longer turns a preprint into exit `3` — read
+    the log line if you want the VoR.
+- `paper_fetch.py` on its own is unchanged (it has no browser or proxy layer).
+- Tests: `tests/test_vor_upgrade.py` (no network, no browser).
+
+ — 2026-11-04 — a preprint is labelled as a preprint, not passed off as the article
 
 The smoke DOI `10.1186/s12984-023-01168-x` exited `0` with a PDF that was the Research Square
 **preprint**: the published copies (BMC, PMC, Europe PMC) all wall scripts now, and `--title`

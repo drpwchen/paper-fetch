@@ -281,6 +281,12 @@ the attachment's title, since Zotero may rename the file). A caller that keys su
 exists under the name I asked for" will now see a preprint as missing — read `path` and
 `version` instead. Asking for a preprint's own DOI gets no warning and no rename.
 
+`library_session.py fetch` does not stop at a layer-1 preprint (since 1.10.0): it goes on to the
+direct browser route and your library's proxy route for the version of record. If one of them
+gets it, that PDF is saved under the requested name and the preprint file is deleted; if not,
+the labelled preprint stays and the run still exits `0`, with a line saying why the version of
+record could not be fetched.
+
 ### When every route fails: an r/Scholar request (drafted, never posted)
 
 ```bash
