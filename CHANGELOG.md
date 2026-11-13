@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Docs: README quality pass (2026-11-14)
+
+### Docs
+- README: added "Requirements & cost" and "Limitations", moved the support line up to the quickstart, and turned the footer into a `## Support 支持` section.
+- Moved the competitor comparison table and the r/Scholar request walkthrough out of the README into `docs/comparison.md` and `docs/reddit-request.md`; the README keeps a short summary and a link.
+- Added `SECURITY.md` and `CITATION.cff`.
+- No code change.
+
 ## [1.10.0] — 2026-11-04 — after a layer-1 preprint, `library_session.py` goes on for the version of record
 
 1.9.0 labelled the preprint honestly, but `library_session.py fetch` still stopped at it: the
