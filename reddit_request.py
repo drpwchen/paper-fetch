@@ -12,9 +12,9 @@ It never posts. Writing to someone else's community is a human act; the draft is
 for you to paste. (An integration that posts *as you, from your own logged-in browser, only
 when you say so* can sit on top of `track` — this repo does not ship one.)
 
-    python reddit_request.py draft <DOI|PMID> [--json]     # OA gate → title/body → state
+    python reddit_request.py draft <DOI|PMID> [--dest P] [--json]   # OA gate → title/body → state
     python reddit_request.py dedupe <DOI>                  # already requested on r/Scholar?
-    python reddit_request.py track <post_url> [--doi D] [--record-id R] [--title T]
+    python reddit_request.py track <post_url> [--doi D] [--record-id R] [--title T] [--dest P]
     python reddit_request.py poll [--json]                 # one pass over tracked threads
     python reddit_request.py verify <post> <pdf> [--registry NCT…]   # or --manual
     python reddit_request.py close <post>                  # done by hand / give up
@@ -58,7 +58,10 @@ sleep while nothing is open.
 The poster's own "thanks solution verified" comment moves a request to `verified` too.
 `status` prints the tracking table (posted / replies / link offered / status / thanked);
 `<state_dir>/status.md` holds the same table and is rewritten on every state change.
-Notifications carry title, DOI, status and comment count — never comment text.
+Notifications carry title, DOI, record id, status, comment count, the replying comment's
+Reddit permalink, the host the offered link is on, the destination path and what to do —
+never comment text or the offered link itself. A sink that missed a reply (added later, or
+failing at the time) gets it on the next `poll` or `notify-test`, marked `catch_up`.
 """
 from __future__ import annotations
 
@@ -79,7 +82,7 @@ import requests
 
 from paper_config import CFG
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 _R = {
     "subreddit": "Scholar",
     "state_dir": "",
@@ -225,12 +228,55 @@ def warn_no_sink() -> None:
 def _render(ev: dict) -> tuple[str, str]:
     """(title, body) shared by every human-facing sink. Never carries comment text."""
     title = f"r/{_R['subreddit']}: {_HEAD.get(ev['event'], ev['event'])}"
+    if ev.get("catch_up"):
+        title += " (delivered late)"
+    hosts = ", ".join(ev.get("link_hosts") or [])
     body = "\n".join(x for x in (
         ev.get("title"), ev.get("doi") and f"DOI {ev['doi']}",
+        ev.get("record_id") and f"record {ev['record_id']}",
         ev.get("messages") and f"{ev['messages']} new private message(s)",
         ev.get("status") and f"status {ev.get('status')} · {ev.get('comments', 0)} comment(s)",
+        hosts and f"link offered on: {hosts} (untrusted — open it yourself)",
+        *(f"reply: {u}" for u in ev.get("reply_urls") or []),
+        ev.get("dest") and f"save to: {ev['dest']}",
+        ev.get("action") and f"to do: {ev['action']}",
         ev.get("url")) if x)
     return title, body
+
+
+# What a person has to do about each event — notifications must say it, not just "something happened".
+_ACTION = {
+    "fulfilled": ("Open the offered link yourself in a browser (never fetched automatically). "
+                  "If it is a Reddit chat/DM, log in as the poster. Save the PDF{dest}, then run "
+                  "`verify {id} <file>`."),
+    "replied": ("Read the reply on Reddit — no link yet; it may point you to Reddit chat or your "
+                "DMs (log in as the poster)."),
+    "stale": "Closed with no reply. Interlibrary loan or writing to the author are the next steps.",
+    "inbox": "Log in to Reddit and read your inbox (private messages are not in any feed).",
+}
+
+
+def _host(u: str) -> str:
+    h = re.sub(r"^[a-z]+://", "", u, flags=re.I).split("/", 1)[0].split("@")[-1].split(":")[0].lower()
+    return h.removeprefix("www.")
+
+
+def event_detail(event: str, rec: dict | None) -> dict:
+    """The actionable part of an event: who answered where, what the link is on, where the PDF
+    goes, and what the person must do. Reddit permalinks and host names only — never the offered
+    link itself or comment text (both are untrusted)."""
+    rec = rec or {}
+    out = {}
+    links = rec.get("links") or []
+    if links:
+        out["reply_urls"] = [x["comment"] for x in links if x.get("comment")][-3:]
+        out["link_hosts"] = sorted({h for x in links for h in x.get("hosts") or []})
+    if rec.get("dest"):
+        out["dest"] = rec["dest"]
+    if event in _ACTION:
+        out["action"] = _ACTION[event].format(
+            id=rec.get("id") or "<id>", dest=f" to {rec['dest']}" if rec.get("dest") else "")
+    return out
 
 
 def _redact(msg: str, *secrets: str | None) -> str:
@@ -406,24 +452,81 @@ def deliver(i: int, sink: dict, ev: dict) -> str | None:
     return err
 
 
+def sink_key(sink: dict) -> str:
+    """A sink's identity in the delivery ledger: its `name`, else a hash of what it points at.
+    Stable when sinks are reordered; a changed target counts as a new sink (it has seen nothing)."""
+    sink = sink or {}
+    if sink.get("name"):
+        return sink["name"]
+    import hashlib
+    ident = {k: v for k, v in sink.items() if k not in ("events", "name")}
+    return f"{sink.get('type', '?')}:" + hashlib.sha1(
+        json.dumps(ident, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:10]
+
+
+# Events that ask a person to act on an open request. Each post keeps, per sink, which of them
+# that sink has actually received (`notified`). A reply that arrives while a sink is missing,
+# misconfigured or failing is not lost: the next `poll` (or `notify-test`) delivers it late.
+CATCH_UP = ("replied", "fulfilled")
+
+
+def _wants(sink: dict, event: str) -> bool:
+    wanted = (sink or {}).get("events")
+    return (sink or {}).get("type") != "jsonl" and (not wanted or event == "test" or event in wanted)
+
+
+def _event(event: str, rec: dict, **extra) -> dict:
+    return {"ts": _now(), "event": event, "post_id": rec.get("id"), "url": rec.get("url"),
+            "title": rec.get("title"), "doi": rec.get("doi"), "record_id": rec.get("record_id"),
+            "status": rec.get("status"), "comments": rec.get("comments", 0),
+            **event_detail(event, rec), **extra}
+
+
+def _fan_out(ev: dict, rec: dict | None, sinks) -> None:
+    for i, sink in sinks:
+        if deliver(i, sink, ev) is None and rec is not None and rec.get("id") and ev["event"] in CATCH_UP:
+            got = rec.setdefault("notified", {}).setdefault(sink_key(sink), [])
+            if ev["event"] not in got:
+                got.append(ev["event"])
+
+
 def emit(event: str, rec: dict | None = None, *, notify: bool = True, **extra) -> None:
-    """Append to events.jsonl (always), then fan out to the configured sinks."""
-    rec = rec or {}
-    ev = {"ts": _now(), "event": event, "post_id": rec.get("id"), "url": rec.get("url"),
-          "title": rec.get("title"), "doi": rec.get("doi"), "record_id": rec.get("record_id"),
-          "status": rec.get("status"), "comments": rec.get("comments", 0), **extra}
+    """Append to events.jsonl (always), then fan out to the configured sinks.
+    The caller saves state afterwards: successful deliveries are recorded on `rec`."""
+    ev = _event(event, rec or {}, **extra)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with EVENTS_FILE.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
     if not notify:
         return
-    for i, sink in enumerate(_R["notify"] or []):
-        if (sink or {}).get("type") == "jsonl":
+    _fan_out(ev, rec, [(i, s) for i, s in enumerate(_R["notify"] or []) if _wants(s, event)])
+
+
+def catch_up(st: dict, only: set | None = None) -> int:
+    """Deliver what each sink missed: for every open request whose status asks for action
+    (replied / fulfilled), each usable sink that has not yet received that event gets it now,
+    marked `catch_up: true`. Covers a sink added after the reply, and a delivery that failed.
+    `only` limits it to these sink keys. Returns how many deliveries were attempted."""
+    n = 0
+    for rec in st["posts"].values():
+        event = rec.get("status")
+        if event not in CATCH_UP:
             continue
-        wanted = (sink or {}).get("events")
-        if wanted and event != "test" and event not in wanted:
+        missing = [(i, s) for i, s in enumerate(_R["notify"] or [])
+                   if _wants(s, event) and not sink_problems(s)
+                   and (only is None or sink_key(s) in only)
+                   and event not in (rec.get("notified") or {}).get(sink_key(s), [])]
+        if not missing:
             continue
-        deliver(i, sink, ev)
+        ev = _event(event, rec, catch_up=True)
+        with EVENTS_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({**ev, "sinks": [_label(i, s) for i, s in missing]},
+                                ensure_ascii=False) + "\n")
+        print(f"[notify] {rec['id']}: delivering missed `{event}` to "
+              + ", ".join(_label(i, s) for i, s in missing), file=sys.stderr)
+        _fan_out(ev, rec, missing)
+        n += len(missing)
+    return n
 
 
 def failing_sinks() -> list[tuple[str, dict]]:
@@ -651,7 +754,7 @@ def cmd_draft(a) -> int:
     st = load_state()
     key = (meta.get("doi") or f"pmid:{meta['pmid']}").lower()
     st["drafts"][key] = {**d, "status": "drafted", "created": _now(),
-                         "record_id": a.record_id}
+                         "record_id": a.record_id, "dest": _dest(a.dest)}
     live = [p for p in st["posts"].values() if (p.get("doi") or "").lower() == key]
     if live:                                   # already out there — this draft is a preview only
         st["drafts"][key].update(status="posted", post_id=live[0]["id"])
@@ -690,6 +793,11 @@ def cmd_dedupe(a) -> int:
     return 0
 
 
+def _dest(path: str | None) -> str | None:
+    """Where the PDF should end up once someone sends it — carried by every notification."""
+    return str(pathlib.Path(os.path.expanduser(path)).resolve()) if path else None
+
+
 def cmd_track(a) -> int:
     st = load_state()
     pid = post_id(a.url)
@@ -703,7 +811,8 @@ def cmd_track(a) -> int:
                                    "seen": [], "comments": 0, "links": []}
     rec.update({k: v for k, v in {"url": f"https://www.reddit.com/comments/{pid}/",
                                   "doi": doi, "title": title,
-                                  "record_id": a.record_id or d.get("record_id")}.items() if v})
+                                  "record_id": a.record_id or d.get("record_id"),
+                                  "dest": _dest(a.dest) or d.get("dest")}.items() if v})
     rec.setdefault("updated", rec["created"])
     st["posts"][pid] = rec
     if d:
@@ -747,7 +856,8 @@ def _ingest(st: dict, rec: dict, entries: list[dict]) -> list[str]:
             continue
         rec["comments"] = rec.get("comments", 0) + 1
         if e["external"]:
-            rec["links"].append({"comment": e["link"], "author": e["author"], "n": len(e["external"])})
+            rec["links"].append({"comment": e["link"], "author": e["author"], "n": len(e["external"]),
+                                 "hosts": sorted({_host(u) for u in e["external"]})})
             if _advance(rec, "fulfilled"):
                 events.append("fulfilled")
         elif _advance(rec, "replied"):
@@ -790,6 +900,7 @@ def _close_stale(st: dict) -> None:
 def cmd_poll(a) -> int:
     st = load_state()
     _close_stale(st)
+    catch_up(st)                        # replies a sink missed (added later, or failing then)
     save_state(st)
     todo = [r for r in st["posts"].values() if r["status"] in OPEN_STATES]
     if not todo:
@@ -891,6 +1002,8 @@ def cmd_verify(a) -> int:
     who = rec["links"][-1]["comment"] if rec.get("links") else rec["url"]
     print(f"✓ verified. Reply under the fulfiller's comment with exactly: thanks solution verified\n"
           f"  {who}")
+    if rec.get("dest") and pathlib.Path(rec["dest"]).resolve() != pathlib.Path(a.pdf).resolve():
+        print(f"  requested destination: {rec['dest']}")
     return 0
 
 
@@ -1013,6 +1126,11 @@ def cmd_notify_test(a) -> int:
             print("        note: an open ntfy.sh topic is readable by anyone who guesses its name "
                   "— make it long and random.")
     print(f"{len(sinks) - failed}/{len(sinks)} sink(s) delivered")
+    st = load_state()                   # a sink that works now gets the replies it missed
+    late = catch_up(st, {sink_key(s) for i, s in sinks})
+    if late:
+        save_state(st)
+        print(f"{late} missed notification(s) delivered late (see events.jsonl)")
     return NOTIFY_EXIT if failed else 0
 
 
@@ -1022,6 +1140,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("draft")
     p.add_argument("ident", help="DOI or PMID")
     p.add_argument("--record-id")
+    p.add_argument("--dest", help="where the PDF should go once received (shown in notifications)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--skip-oa-check", action="store_true")
     p = sub.add_parser("dedupe")
@@ -1031,6 +1150,7 @@ def main(argv=None) -> int:
     p.add_argument("--doi")
     p.add_argument("--record-id")
     p.add_argument("--title")
+    p.add_argument("--dest", help="where the PDF should go once received (shown in notifications)")
     p = sub.add_parser("poll")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("verify")

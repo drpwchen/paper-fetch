@@ -5,13 +5,37 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — Docs: README quality pass (2026-11-14)
+## [1.11.0] — 2026-11-15 — r/Scholar replies reach a person even when the sink came later
 
-### Docs
+Two requests were answered with a file-host link; `poll` logged `fulfilled` on time, but the
+only configured sink was a phone push. The channel that reaches the person who acts on it was
+added a week later — and nothing ever re-sent those two replies. A delivery that failed was
+also lost for good (only a warning at the top of `status.md`).
+
+### Added
+- **Late delivery (`catch_up`).** Each tracked request keeps a per-sink ledger (`notified`) of
+  the `replied` / `fulfilled` events that sink actually received. `poll` — and a passing
+  `notify-test` — deliver whatever a usable sink missed, marked `catch_up: true` and rendered
+  "(delivered late)". Sinks are identified by `name`, else a hash of their target, so
+  reordering them does not re-send; `verified` / `closed` requests are never re-announced.
+  Requests tracked before 1.11.0 that are still open may be announced once more after upgrading.
+- **Notifications say what to do.** Events now carry `reply_urls` (Reddit permalinks of the
+  replies with links), `link_hosts` (e.g. `mediafire.com`), `dest` and a one-line `action`;
+  the human-facing sinks print them, plus the `record_id`. Still never comment text or the
+  offered link itself.
+- **`--dest` on `draft` and `track`**: where the PDF should go once someone sends it (carried
+  from the draft to the tracked request, shown by `verify`).
+
+### Docs (README quality pass, 2026-11-14)
 - README: added "Requirements & cost" and "Limitations", moved the support line up to the quickstart, and turned the footer into a `## Support 支持` section.
 - Moved the competitor comparison table and the r/Scholar request walkthrough out of the README into `docs/comparison.md` and `docs/reddit-request.md`; the README keeps a short summary and a link.
 - Added `SECURITY.md` and `CITATION.cff`.
-- No code change.
+- `docs/reddit-request.md`: late delivery, the new event fields, `--dest`.
+
+### Tests
+- `tests/test_reddit_catchup.py` reproduces the miss (reply ingested with no sink, sink added
+  later → delivered on the next poll, once), a failed delivery being retried, `notify-test`
+  catch-up, no catch-up for verified requests, and the rendered text.
 
 ## [1.10.0] — 2026-11-04 — after a layer-1 preprint, `library_session.py` goes on for the version of record
 

@@ -1,7 +1,7 @@
 # When every route fails: an r/Scholar request (drafted, never posted)
 
 ```bash
-python reddit_request.py draft 10.1136/annrheumdis-2021-219846   # OA gate, then title + body
+python reddit_request.py draft 10.1136/annrheumdis-2021-219846 --dest pdfs/So2021.pdf  # OA gate, then title + body
 python reddit_request.py dedupe 10.1136/annrheumdis-2021-219846  # has someone asked already?
 python reddit_request.py track https://www.reddit.com/r/Scholar/comments/<id>/ --doi <DOI>
 python reddit_request.py poll                                    # schedule this every 30 min
@@ -38,8 +38,16 @@ r/Scholar is your call. If you make it, this script does the bookkeeping — **i
   the same table as Markdown and is rewritten on every change (`status --md` / `--json` too).
 - **Notifications** go to `<state_dir>/events.jsonl` always — but nobody reads that file, so
   set up at least one channel in `reddit.notify`. Until you do, `track`, `poll` and the top of
-  `status.md` say so loudly. Events carry title, DOI, status and comment count — never
-  comment text.
+  `status.md` say so loudly. Events carry title, DOI, record id, status and comment count,
+  and — so the message says what to do, not just that something happened — the Reddit
+  permalink of the reply (`reply_urls`), the host the offered link is on (`link_hosts`, e.g.
+  `mediafire.com`), where the PDF should go (`dest`, from `draft`/`track --dest`) and a
+  one-line `action`. Never comment text, never the offered link itself (untrusted).
+- **Missed notifications are delivered late.** Each request remembers, per sink, whether that
+  sink has received its `replied` / `fulfilled` event. A sink added *after* the reply, or one
+  that failed at the time, gets it on the next `poll` (or right after a passing `notify-test`),
+  marked `catch_up: true` / "(delivered late)". A request already `verified` or `closed` is not
+  re-announced. Before 1.11.0 such a reply was written to `events.jsonl` and never sent again.
 
   | Channel | You need | Secret (store with `python library_session.py secret set <NAME>`) |
   |---|---|---|
