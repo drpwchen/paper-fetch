@@ -68,64 +68,26 @@ python holdings.py <DOI>     # subscribed? and is this article's YEAR inside the
 - Never build an entitlement check on per-article link-resolver (SFX/OpenURL) queries — the same
   DOI returns a full-text target on one call and nothing minutes later.
 
-Second corollary: **a "dead end" verdict can be wrong.** BMJ was documented here as a Cloudflare
-dead end; in fact the WAF only blocks *headless* requests, and a real headful navigation passes
-first try. If a citation-meta route returns `cf_block`, try `nav=True` before concluding anything.
+Each of these cost real time once; the full account of each (what the log looked like, what
+fixed it) is in [docs/route-lessons.md](docs/route-lessons.md):
 
-Third corollary, the mirror image: **a verdict that once held can go stale.** BMJ's headful `nav`
-route passed on the first try when it was added; two months later the same DOI logged `cf_block`
-twice and a 403 with `nav` still in effect. Read that as "Cloudflare, wait or finish by hand",
-not as "the flag is broken" or "we lost the subscription" — `holdings.py` still says subscribed.
-And check the *name* of the failure before you trust it: that 403 was logged as `no_pdf_meta`
-(a 403 page has no `citation_pdf_url` in it either), which is the same wall wearing a different
-label. Resolver responses are now classified before the meta tag is looked for.
-
-Fifth (2026-09-06): **"PubMed says free, Unpaywall says closed, publisher is Cloudflare-403,
-prefix has no proxy route" is the direct route's job, not a dead end.** `library_session.py
-fetch` runs it on its own when layer 1 reports `free_at_publisher` or `blocked_by`; `--direct`
-forces it. It opens the publisher page in a real browser with NO proxy and fetches the PDF
-from inside the page. If it logs `publisher_refused`, the publisher is declining PDFs for this
-network while serving the HTML — a person in their own browser gets the same — so do not
-"fix" the route; wait, or read the HTML.
-
-Fourth: **"no `citation_pdf_url`" is not "no route".** Some entitled articles simply don't carry
-the tag (Nature news/comment items). A `meta` route can take `pdf_from_landing: "{landing}.pdf"`
-to derive the PDF URL from the article URL instead of giving up.
-
-Fifth: **a headful SPA route that "times out" may be waiting on a modal you can no longer see.**
-The `ck` route logged `boot_timeout` with the PDF endpoint at HTTP 500 on every poll — reads
-like "ClinicalKey is down". The SPA had simply redrawn its organization-choice modal (buttons →
-radio inputs) and the selector matched nothing; the user's own browser sailed through because
-it carried a remember-me token. When an automation profile fails where a human's browser
-succeeds on the *same URL*, diff the two — response bodies of the auth call, then the DOM —
-before blaming the publisher.
-
-Sixth (2026-09-08): **a wall that answers the automation profile is not a wall that answers
-the library.** Springer through the proxy, article the library holds: `request.get` on the
-PDF URL → "Client Challenge" (Fastly) twice; a headful navigation to the article page → the
-same challenge, whose `script.js` answers HTTP 400 — for patchright's Chromium *and* for the
-real Google Chrome binary launched under CDP. The user's own logged-in Chrome, same proxy, same
-URL, passed on the first try and the in-page `fetch()` returned the 1.6 MB PDF. So: the tpl
-route now retries once as a real navigation (it covers walls that only block `request.get`),
-a wall that survives that retry is exit `7`, never `2`, and the finish for that case is the
-user's own browser, not another automation trick. Also: **a DOI prefix names who minted the
-DOI, not who serves it today** — journals move publishers (Respiratory Care `10.4187` → Sage,
-Liebert `10.1089` → Sage) and their back catalogue moves with them. `fetch` resolves `doi.org`
-once for an unknown prefix and matches the landing host against the routes before saying
-`no_route` — and since 1.8.0 for a known prefix too (Ann Rheum Dis `10.1136/annrheumdis-*` is
-BMJ's prefix on an Elsevier journal; the BMJ meta route was answering exit 2 for it).
-
-Seventh (2026-10-15, issue #7): **a small HTML page from PMC / Europe PMC is a wall, not "no
-PDF".** `pmc.ncbi.nlm.nih.gov/articles/PMC…/pdf/` (~1.8 KB) and `europepmc.org/…?pdf=render`
-(~5.5 KB) answer scripts with a JavaScript challenge; `paper_fetch.py` names it `pmc_challenge`
-and exits `7`. A real browser passes only by navigating to the **PDF URL itself** and fetching
-it from inside that page — opening the article page first is not enough. The one honest
-"no PDF" is Europe PMC's own `hasPDF=N` (author manuscript as HTML only), which is checked.
-Re-captured 2026-11-03 (1.8.1): the page depends on host and User-Agent — PMC sends a
-proof-of-work page (`POW_CHALLENGE`, 1.8 KB) or, to a browser UA, "Checking your browser -
-reCAPTCHA" (20.5 KB); Europe PMC sends a Cloudflare **403** "Just a moment...". All three are
-`pmc_challenge`, and both hosts serve them even for a `hasPDF=N` PMCID — so `hasPDF` is looked
-up before any of them is called a wall.
+- **A "dead end" verdict can be wrong.** BMJ's `cf_block` was only the WAF refusing *headless*
+  requests — try `nav=True` (headful navigation) before concluding anything.
+- **A verdict that once held can go stale.** A `cf_block` / 403 on a route that used to pass
+  means "Cloudflare, wait or finish by hand", not "the flag is broken" or "we lost the
+  subscription". Check the failure's *name* too: a 403 was once logged as `no_pdf_meta`.
+- **Free at the publisher but walled everywhere else is the direct route's job**
+  (`library_session.py fetch --direct`: no proxy, real browser). `publisher_refused` = the
+  publisher declines this network; wait or read the HTML, do not "fix" the route.
+- **No `citation_pdf_url` is not "no route"**: a `meta` route can take `pdf_from_landing`.
+- **A headful SPA "timeout" may be a modal you can no longer see** (`ck` `boot_timeout`). When a
+  human's browser succeeds on the same URL, diff the two — auth response bodies, then the DOM.
+- **A wall that answers the automation profile is not a wall that answers the library**
+  (Springer "Client Challenge"): exit `7`, never `2`; the finish is the user's own browser.
+  And **a DOI prefix names who minted the DOI, not who serves it** — `fetch` matches the
+  landing host against the routes before saying `no_route`.
+- **A small HTML page from PMC / Europe PMC is a wall, not "no PDF"** (`pmc_challenge`, exit
+  `7`); the one honest "no PDF" is Europe PMC's `hasPDF=N`, which is checked first.
 
 ## Calling it from an orchestrator
 
@@ -206,25 +168,19 @@ explains the entitlement model. They are written to teach the method, not just t
 
 ## Maintainer notes (the author's own deployment — other users can ignore this section)
 
-- **Two copies.** This public repo is the source of truth for code and docs. A **live** copy runs as
-  the author's local Claude skill (`~/.claude/skills/paper-fetch/`, real `config.yaml`, real
-  `holdings.sqlite`). Every fix lands here first, then is synced to live — back live up to
-  `Documents/Projects/_holding/paper-fetch-live-pre-<ver>-<date>/` before overwriting. Files that
-  exist only in live and must never be copied here: `webbridge_fallback.py` /
-  `ck_webbridge_fallback.py` / `reddit_post_webbridge.py` / `edge_bridge.py` (they drive the
-  author's own browser) and `scrape_holdings.py`
-  (the public repo ships the holdings *schema*, not a scraper — see docs/holdings.md). The former
-  private institution-specific fork is retired (2026-08-08); do not revive it.
+- **Two copies.** This public repo is the source of truth; a **live** copy runs as the author's
+  local Claude skill (`~/.claude/skills/paper-fetch/`). Every fix lands here first, then is
+  synced to live, backing live up before overwriting. A few live-only files must never be
+  copied here; the list and the backup path are in [docs/maintaining.md](docs/maintaining.md).
+  The former private institution-specific fork is retired; do not revive it.
 - `config.yaml` in this checkout is a **test config with fake `example.edu` endpoints** (gitignored),
   kept only so regression runs work. If a route "fails" here, check which config you are on first.
 - **Release ritual**: CHANGELOG entry → commit explicit paths (never `git add -A`) → `git tag vX.Y.Z`
   → GitHub release → reply to and close the issues it fixes → sync live. Docs-only changes (README,
   this file, docs/) ride the next release tag; they are not tagged on their own.
-- **Reviewing an external PR**: run a diff harness on master vs the PR branch — secret-store
-  fingerprint (sha256 of an existing secret), set/get round-trip, miss message, `_pid_alive`,
-  single-instance lock (stale takeover / live → exit 4), OA ladder end to end. Output identical
-  except renamed APIs and wording = no Windows regression. The platform the contributor does not
-  have is the half we must test ourselves. Rebase-merge to keep the author.
+- **Reviewing an external PR**: run a diff harness on master vs the PR branch (secret store,
+  lock, OA ladder); identical output = no Windows regression. Rebase-merge to keep the author.
+  Checklist: [docs/maintaining.md](docs/maintaining.md).
 - Markdown here renders on GitHub: use **bold**, never `==mark==`.
 - Institution-specific facts (subscribed platforms, broken proxy subdomains that need a library
   ticket, the ClinicalKey institution-modal value) are deliberately **not** here — they live in the

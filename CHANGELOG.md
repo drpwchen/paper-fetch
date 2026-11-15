@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] — 2026-11-15 — AGENTS.md slimmed; long-form lessons moved to docs/
+
+Documentation only; no code or behaviour change (`VERSION` stays 1.11.0).
+
+### Changed
+- `AGENTS.md` is 187 lines (was 231) so it fits an agent's instruction budget with room to
+  spare. The seven long "corollary" write-ups under "When a route looks broken, check
+  entitlement FIRST" are now one-line rules, with the full account of each in the new
+  [docs/route-lessons.md](docs/route-lessons.md).
+- The maintainer-only details (live-only file list, backup path, external-PR review harness)
+  moved to the new [docs/maintaining.md](docs/maintaining.md); `AGENTS.md` keeps the release
+  ritual, the config note and a pointer.
+
 ## [1.11.0] — 2026-11-15 — r/Scholar replies reach a person even when the sink came later
 
 Two requests were answered with a file-host link; `poll` logged `fulfilled` on time, but the
