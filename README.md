@@ -286,8 +286,9 @@ record could not be fetched.
 
 `reddit_request.py` drafts an r/Scholar request, checks whether someone has already asked,
 and tracks and verifies replies. It never posts for you. Since Reddit switched RSS off
-(announced for 2026-11-13), the check needs a browser-backed `reddit.dedupe_cmd` and reply
-watching is blind — `poll` says so (exit `10`) instead of reporting "no new replies". Commands and scheduling →
+(announced for 2026-11-13), both the check and reply watching need a logged-in browser behind
+two hooks (`reddit.dedupe_cmd`, `reddit.poll_cmd`); without them `dedupe` and `poll` say so
+(exit `10`) instead of reporting "nobody asked" / "no new replies". Commands and scheduling →
 [docs/reddit-request.md](docs/reddit-request.md).
 
 ### ⚠ Before you batch or parallelize

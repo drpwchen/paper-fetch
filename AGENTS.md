@@ -135,7 +135,7 @@ fixed it) is in [docs/route-lessons.md](docs/route-lessons.md):
   and gets the institution's IP range blocked. `poll` exit `7` = Reddit rate limit: wait.
   Exit `10` = Reddit could not be read (it switched RSS off on 2026-11-13): `dedupe`'s
   `"existing": null` is **not** "nobody asked" — never post on it; `poll` exit `10` means
-  replies are not being watched — tell the user to open the thread.
+  replies are not being watched (no `reddit.poll_cmd`, or it failed) — tell the user to open the thread.
 - The proxy layer is **strictly serial** with a courtesy delay. Never parallelise it: the browser
   profile is an exclusive resource (parallel callers deadlock, then get logged as missing papers),
   and systematic downloading gets the institution's whole IP range blocked. Batch patterns are in

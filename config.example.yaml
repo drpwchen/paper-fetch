@@ -153,3 +153,7 @@ rate:
 #  # substituted; it must exit 0 and print {"existing": [{"id","url","author","title"}, ...]}.
 #  # Unset: `dedupe` reports "unavailable" (exit 10) with the search page to check by hand.
 #  dedupe_cmd: ["python", "/abs/path/my_reddit_search.py", "{doi}"]
+#  # The same for `poll`: argv, "{id}" substituted; it must exit 0 and print the JSON of
+#  # https://www.reddit.com/comments/{id}.json — scripts get 403 there, a logged-in browser's
+#  # fetch() from a reddit.com page gets 200. Unset or failing: that thread is reported BLIND.
+#  poll_cmd: ["python", "/abs/path/my_reddit_thread_json.py", "{id}"]

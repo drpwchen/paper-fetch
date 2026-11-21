@@ -8,7 +8,7 @@ author, or asking on r/Scholar. This script does the bookkeeping for the last on
 the request in the subreddit's own format, checks nobody already asked, then watches the
 thread so you hear about a reply instead of re-opening Reddit every few hours. (Since Reddit
 switched RSS off — announced for 2026-11-13 — checking needs `reddit.dedupe_cmd` and watching
-does not work; see the section on that below.)
+needs `reddit.poll_cmd`; see the section on that below.)
 
 It never posts. Writing to someone else's community is a human act; the draft is printed
 for you to paste. (An integration that posts *as you, from your own logged-in browser, only
@@ -28,22 +28,28 @@ Exit codes: 0 ok · 1 usage · 2 nothing found (no metadata / PDF not verified) 
 8 refused: the article is open access — fetch it, do not ask strangers for it ·
 9 notify-test: a sink failed, or no sink is usable ·
 10 Reddit could not be read: `dedupe` could not check (stdout says `"existing": null` and
-   prints the search page to check by hand), or `poll` could not read a thread's feed.
+   prints the search page to check by hand), or `poll` could not read a thread.
 
-## Reddit switched RSS off on 2026-11-13 — dedupe needs a browser, poll is blind
+## Reddit switched RSS off on 2026-11-13 — dedupe and poll need a browser
 
 Measured 2026-11-21: every `*.rss` URL (`/r/Scholar/search.rss`, `/r/Scholar/new.rss`,
 `/comments/<id>/.rss`, other subreddits too) answers HTTP 404 with an Atom feed titled
 "Not Found" — for this script's User-Agent, python-requests' and curl's defaults, and from
-inside a real browser (not logged in; logged-in untested) alike; `search.json` answers 403 and old.reddit redirects to a
-login page. Reddit had announced the end of RSS for 13 November 2026. So:
+inside a real browser, logged out and logged in alike. Scripts get 403 from `search.json` and
+from `/comments/<id>.json`; old.reddit redirects to a login page. Reddit had announced the end
+of RSS for 13 November 2026. What still answers is a logged-in browser: there,
+`fetch("/comments/<id>.json")` from a reddit.com page returns the whole comment tree. So:
 
 - `dedupe` cannot use the search feed. Point `reddit.dedupe_cmd` at something that can search
   Reddit (a real browser); without it, `dedupe` says "unavailable" — it never reports
   "nobody asked" when it could not look. A caller must not post on an unavailable dedupe
   unless a person checked the printed search page.
-- `poll` cannot see replies. It exits 10, names the threads to open by hand, sends one
-  `poll_blind` event per thread, and `stale_days` no longer closes a thread it could not read.
+- `poll` reads threads through `reddit.poll_cmd`: argv, `{id}` substituted, that prints the
+  JSON of `https://www.reddit.com/comments/{id}.json` (two Listings: the post, its comments)
+  — e.g. from a logged-in browser. This script parses it (`parse_listing`) the way it used to
+  parse the feed. Without the hook, or when it fails or prints anything else (an HTML page, a
+  different thread), `poll` is blind for that thread: exit 10, the thread URL to open by hand,
+  one `poll_blind` event, and `stale_days` does not close a thread it could not read.
 
 ## Why the OA gate refuses instead of warning (2026-10-24)
 
@@ -64,7 +70,7 @@ from a scheduler every 30 minutes, not in a tight loop.
 
 ## What polling can and cannot see
 
-Each tracked thread's comment feed is read; a comment by anyone other than the poster and
+Each tracked thread's comments are read; a comment by anyone other than the poster and
 AutoModerator moves the request to `replied`, a comment carrying an off-Reddit link to
 `fulfilled` (a *candidate*: links are untrusted file hosts and are never downloaded here).
 Reddit chat is not in any RSS feed — a fulfiller who answers by chat is invisible unless you
@@ -101,7 +107,7 @@ import requests
 
 from paper_config import CFG
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 _R = {
     "subreddit": "Scholar",
     "state_dir": "",
@@ -114,6 +120,7 @@ _R = {
     "on_idle": [],          # argv run when poll finds nothing left to watch (e.g. disable it)
     "notify": [],
     "dedupe_cmd": [],       # argv, "{doi}" substituted; prints {"existing": [...]} (see dedupe())
+    "poll_cmd": [],         # argv, "{id}" substituted; prints /comments/{id}.json (see _poll_cmd())
     **(CFG.get("reddit") or {}),
 }
 STATE_DIR = pathlib.Path(os.path.expanduser(os.environ.get("PAPERFETCH_REDDIT_STATE")
@@ -140,6 +147,10 @@ class DedupeUnavailable(Exception):
     def __init__(self, why: str, manual_url: str):
         super().__init__(why)
         self.manual_url = manual_url
+
+
+class PollUnavailable(Exception):
+    """poll_cmd could not read a thread — which is NOT "no new comments"."""
 
 
 # ── state ────────────────────────────────────────────────────────────────────
@@ -282,8 +293,9 @@ _ACTION = {
                 "DMs (log in as the poster)."),
     "stale": "Closed with no reply. Interlibrary loan or writing to the author are the next steps.",
     "inbox": "Log in to Reddit and read your inbox (private messages are not in any feed).",
-    "poll_blind": ("Reddit no longer serves this thread's feed, so replies are not watched. "
-                   "Open the thread yourself to check; `close {id}` once you are done."),
+    "poll_blind": ("This thread could not be read (Reddit switched RSS off; reddit.poll_cmd "
+                   "unset or failing), so replies are not watched. Open the thread yourself to "
+                   "check; `close {id}` once you are done."),
 }
 
 
@@ -749,8 +761,54 @@ def parse_feed(xml: str) -> list[dict]:
                     "published": (e.findtext(f"{ATOM}published") or "")[:16].replace("T", " "),
                     "link": link_el.get("href") if link_el is not None else "",
                     "text": re.sub(r"<[^>]+>", " ", content),
-                    "external": [u for u in links if u.startswith("http")
-                                 and not re.match(r"https?://([a-z0-9-]+\.)?(reddit\.com|redd\.it)/", u)]})
+                    "external": _external(links)})
+    return out
+
+
+def _external(urls: list[str]) -> list[str]:
+    return [u for u in urls if u.startswith("http")
+            and not re.match(r"https?://([a-z0-9-]+\.)?(reddit\.com|redd\.it)/", u)]
+
+
+def parse_listing(data) -> list[dict]:
+    """Reddit's /comments/<id>.json (a list of two Listings: the post, then its comment tree)
+    → the same entries parse_feed() makes, so _ingest() is unchanged. Nested replies are
+    flattened; "load more" stubs (kind `more`) are skipped. Raises ValueError on any other shape."""
+    if not (isinstance(data, list) and len(data) == 2
+            and all(isinstance(x, dict) and x.get("kind") == "Listing" for x in data)):
+        raise ValueError("not a Reddit thread listing")
+
+    def when(utc) -> str:
+        try:
+            return _dt.datetime.fromtimestamp(float(utc), _dt.timezone.utc).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            return ""
+
+    def entry(kind: str, d: dict) -> dict:
+        # body_html is escaped HTML unless the URL asked for raw_json=1 — unescape either way
+        page = html.unescape(d.get("body_html") or d.get("selftext_html") or "")
+        text = re.sub(r"<[^>]+>", " ", page) if page else (d.get("body") or d.get("selftext") or "")
+        urls = ([html.unescape(u) for u in re.findall(r'href="([^"]+)"', page)]
+                or re.findall(r"https?://[^\s)\]]+", text))
+        return {"id": d.get("name") or f"{kind}_{d.get('id', '')}",
+                "author": d.get("author") or "",
+                "title": d.get("title", "") if kind == "t3" else "",
+                "published": when(d.get("created_utc")),
+                "link": "https://www.reddit.com" + (d.get("permalink") or ""),
+                "text": text,
+                "external": _external(urls)}
+
+    out = [entry("t3", c["data"]) for c in data[0]["data"].get("children", []) if c.get("kind") == "t3"]
+
+    def walk(children):
+        for c in children or []:
+            if c.get("kind") != "t1":
+                continue
+            out.append(entry("t1", c["data"]))
+            rep_ = c["data"].get("replies")
+            if isinstance(rep_, dict):
+                walk(rep_.get("data", {}).get("children"))
+    walk(data[1]["data"].get("children"))
     return out
 
 
@@ -955,6 +1013,27 @@ def _ingest(st: dict, rec: dict, entries: list[dict]) -> list[str]:
     return events
 
 
+def _poll_cmd(pid: str) -> list[dict]:
+    """Run reddit.poll_cmd ("{id}" substituted). It must exit 0 and print the JSON of
+    /comments/<id>.json on stdout — for THIS thread; anything else is PollUnavailable."""
+    argv = [str(x).replace("{id}", pid) for x in _R["poll_cmd"]]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise PollUnavailable(f"poll_cmd: {type(e).__name__}: {e}"[:200]) from None
+    tail = (p.stderr or "").strip().splitlines()[-1:] or [""]
+    if p.returncode != 0:
+        raise PollUnavailable(f"poll_cmd exit {p.returncode}: {tail[0][:160]}")
+    try:
+        entries = parse_listing(json.loads(p.stdout))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise PollUnavailable(f"poll_cmd printed no thread JSON ({tail[0][:120]})") from None
+    if not any(e["id"] == f"t3_{pid}" for e in entries):
+        raise PollUnavailable(f"poll_cmd printed a different thread, not t3_{pid}")
+    return entries
+
+
 def _hook(name: str) -> None:
     argv = _R.get(name) or []
     if not argv:
@@ -1020,7 +1099,29 @@ def cmd_poll(a) -> int:
             else:
                 print(f"[poll] secret {_R['inbox_feed_secret']!r} not stored — inbox skipped",
                       file=sys.stderr)
-        for rec in todo:
+        for i, rec in enumerate(todo):
+            if _R.get("poll_cmd"):
+                if i:
+                    time.sleep(random.uniform(3, 8))        # a person does not open them at once
+                rec["polled"] = _now()
+                try:
+                    entries = _poll_cmd(rec["id"])
+                except PollUnavailable as e:
+                    rec["poll_http"] = "cmd_failed"
+                    print(f"[poll] {rec['id']}: {e}", file=sys.stderr)
+                    report.append({"id": rec["id"], "http": "cmd_failed", "events": []})
+                    if not rec.get("blind_notified"):
+                        rec["blind_notified"] = _now()
+                        emit("poll_blind", rec, http="cmd_failed")
+                    continue
+                rec["poll_http"] = 200                     # read — stale_days may judge it
+                rec.pop("blind_notified", None)
+                evs = _ingest(st, rec, entries)
+                save_state(st)
+                for ev in evs:
+                    emit(ev, rec, notify=ev != "verified_by_op")
+                report.append({"id": rec["id"], "http": 200, "events": evs, "status": rec["status"]})
+                continue
             hdr = {}
             if rec.get("etag"):
                 hdr["If-None-Match"] = rec["etag"]
@@ -1063,8 +1164,10 @@ def cmd_poll(a) -> int:
             print(f"{x['id']}  HTTP {x['http']}  {x.get('status', '')}  "
                   f"{', '.join(x['events']) or 'no new events'}")
     if blind:
-        print(f"[poll] BLIND: {len(blind)} thread feed(s) unreadable (Reddit switched RSS off on "
-              "2026-11-13) — replies are NOT being watched. Open by hand:\n  "
+        print(f"[poll] BLIND: {len(blind)} thread(s) unreadable (Reddit switched RSS off on "
+              "2026-11-13; " + ("reddit.poll_cmd failed" if _R.get("poll_cmd") else
+                                "set reddit.poll_cmd") + ") — replies are NOT being watched. "
+              "Open by hand:\n  "
               + "\n  ".join(st["posts"][x["id"]].get("url") or x["id"] for x in blind),
               file=sys.stderr)
         return 10

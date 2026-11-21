@@ -5,6 +5,38 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] — 2026-11-21 — poll reads threads again, through a browser hook
+
+Measured the evening of 2026-11-21, after logging the browser in: the `*.rss` feeds stay 404
+logged in too, and scripts get 403 from `/comments/<id>.json` — but `fetch("/comments/<id>.json")`
+from an `/r/<sub>/` page in the logged-in browser answers 200 with the whole thread (from a
+`/robots.txt` page the same fetch is 403). One tracked thread had a fulfiller's reply nobody
+had seen since 1.12.0 reported it blind.
+
+### Added
+- `reddit.poll_cmd`: argv (`{id}` substituted) for a command that prints the JSON of
+  `/comments/{id}.json`. When set, `poll` reads each thread through it instead of the dead
+  feed; between threads it waits 3–8 s.
+- `parse_listing()`: Reddit's thread JSON (post + comment tree; nested replies flattened,
+  `more` stubs skipped; escaped or raw `body_html`) → the same entries `parse_feed()` makes,
+  so replied / fulfilled / verified-by-poster work as before.
+- `PollUnavailable`: the hook failed, printed no thread JSON, or printed a different thread.
+  `poll` treats it like an unreadable feed — `BLIND`, exit `10`, one `poll_blind` — and records
+  `poll_http: "cmd_failed"`, so `stale_days` does not close the thread.
+
+### Fixed
+- Off-Reddit links in a comment keep `&` in their query string (`&amp;` was kept as-is).
+
+### Changed
+- Docs: logged-in RSS measured (404 too); "poll is blind" becomes "poll needs `poll_cmd`".
+
+### Tests
+- `tests/test_reddit_poll_cmd.py` (17): entry shape and UTC time, escaped `body_html`, nested
+  replies and `more` stubs, other JSON shapes rejected; through the hook: link → fulfilled (and
+  the hook gets the id), seen comment → no second event, plain reply → replied, poster's thanks
+  → verified, failure / HTML / wrong shape / other thread → blind once and not "read", blind
+  flag cleared on recovery, `stale_days` waits for a read.
+
 ## [1.12.0] — 2026-11-21 — Reddit switched RSS off: dedupe says "unavailable", poll says "blind"
 
 Reddit announced the end of RSS for 2026-11-13. Thread feeds still answered 200 on 2026-11-03;
