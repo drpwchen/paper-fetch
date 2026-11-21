@@ -11,8 +11,11 @@ switched RSS off — announced for 2026-11-13 — checking needs `reddit.dedupe_
 needs `reddit.poll_cmd`; see the section on that below.)
 
 It never posts. Writing to someone else's community is a human act; the draft is printed
-for you to paste. (An integration that posts *as you, from your own logged-in browser, only
-when you say so* can sit on top of `track` — this repo does not ship one.)
+for you to paste. (An integration that posts *as you, from your own logged-in browser* can sit
+on top of `track` — this repo does not ship one. By default such an integration should post
+only when you say so for that request; `reddit.auto_post: true` (default false) is your
+standing permission for an agent that was fetching a paper FOR you to post its request itself
+— every draft carries `auto_post` so the integration can check it.)
 
     python reddit_request.py draft <DOI|PMID> [--dest P] [--json]   # OA gate → title/body → state
     python reddit_request.py dedupe <DOI>                  # already requested on r/Scholar?
@@ -107,7 +110,7 @@ import requests
 
 from paper_config import CFG
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 _R = {
     "subreddit": "Scholar",
     "state_dir": "",
@@ -121,6 +124,7 @@ _R = {
     "notify": [],
     "dedupe_cmd": [],       # argv, "{doi}" substituted; prints {"existing": [...]} (see dedupe())
     "poll_cmd": [],         # argv, "{id}" substituted; prints /comments/{id}.json (see _poll_cmd())
+    "auto_post": False,     # True = an agent fetching a paper for you may post its request itself
     **(CFG.get("reddit") or {}),
 }
 STATE_DIR = pathlib.Path(os.path.expanduser(os.environ.get("PAPERFETCH_REDDIT_STATE")
@@ -699,7 +703,10 @@ def build_draft(meta: dict) -> dict:
     lines.append(_R["body_note"])
     return {"subreddit": _R["subreddit"], "flair": "Requesting",
             "title": f"[Article] {title}{tail}", "body": "\n\n".join(lines),
-            "doi": meta.get("doi"), "pmid": meta.get("pmid"), "article_title": meta["title"]}
+            "doi": meta.get("doi"), "pmid": meta.get("pmid"), "article_title": meta["title"],
+            # the user's standing permission (config reddit.auto_post, default false) for an
+            # agent that was fetching this paper for them to post the request itself
+            "auto_post": bool(_R.get("auto_post"))}
 
 
 def draft_for_envelope(doi: str, env: dict | None = None) -> dict:

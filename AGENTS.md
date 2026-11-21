@@ -127,9 +127,12 @@ fixed it) is in [docs/route-lessons.md](docs/route-lessons.md):
   article is in there and cuts it out of the volume (the volume is kept alongside). Handing a
   whole volume to a downstream reader is worse than handing it nothing: it produces a
   confident answer about the wrong study.
-- **`reddit_draft` in a failed envelope is a draft, never a post.** Posting to r/Scholar is the
+- **`reddit_draft` in a failed envelope is a draft, not a post.** Posting to r/Scholar is the
   user's own act — show them the draft; do not post on their behalf unless they explicitly ask
-  for that specific post. `reddit_request.py draft` exits `8` for an OA article: fetch it in a
+  for that specific post, **or** the draft says `"auto_post": true` (config `reddit.auto_post`,
+  default false: the user's standing permission for an agent that was fetching this paper for
+  them). Even then: only after the library layer also ended `2`/`7`, only after a `dedupe` that
+  actually looked (exit `0`, `[]`), through the user's own posting integration and its limits. `reddit_request.py draft` exits `8` for an OA article: fetch it in a
   real browser (`library_session.py fetch --direct`), do not ask strangers for it. Never pass
   PDFs obtained through the library or a TDM key on to other people — that breaks the licence
   and gets the institution's IP range blocked. `poll` exit `7` = Reddit rate limit: wait.

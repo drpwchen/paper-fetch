@@ -23,7 +23,8 @@ JSON envelope: {schema, doi, ok, route, tried[], bytes, sha256, path, resolver_u
 ==preprint 與 accepted 仍是 exit 0==，但檔案存成 `<stem>.preprint.pdf`／`<stem>.accepted.pdf`
 （不在要求的檔名下；`path` 是實際位置）、envelope 附 `vor_url`、`vor_blocked`（擋住正式版的
 bot 牆網址，用自己的瀏覽器開）與 `zotero_attachment_title`。判斷順序見 classify_version。
-`reddit_draft`（只在失敗時）：r/Scholar 求文草稿（reddit_request.py），==只是草稿、不會發==；
+`reddit_draft`（只在失敗時）：r/Scholar 求文草稿（reddit_request.py），==只是草稿、本程式不會發==；
+草稿的 `auto_post`＝使用者是否授權「替他找文章的 agent」自己代發（config `reddit.auto_post`，預設 false）；
 OA／bot 牆／PubMed free 的文章給 {"refused": …}——那些該走 layer 2 的瀏覽器，不是去跟人要。
 `blocked_by` 列出被 bot 牆（js_challenge / recaptcha / cf_*）擋掉的候選 URL——有它就代表
 全文在牆後面，下一步是 layer 2 的真瀏覽器，不是「無全文」。`free_at_publisher` 是 PubMed

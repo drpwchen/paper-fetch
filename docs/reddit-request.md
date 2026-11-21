@@ -19,6 +19,11 @@ r/Scholar is your call. If you make it, this script does the bookkeeping — **i
   instead: a publisher that blocks scripts is not a paywall, and asking strangers for a gold-OA
   paper is the mistake this gate exists for. Without a working Unpaywall check it refuses too,
   unless you pass `--skip-oa-check`.
+- **`reddit.auto_post`** (default `false`): every draft carries `"auto_post"`. Off, an agent
+  shows you the draft and posts nothing. On, it is your standing permission for an agent that
+  was fetching the paper for you to post the request itself through your own posting
+  integration — still only after the library layer failed too and a `dedupe` that looked. This
+  repo ships no poster.
 - **`paper_fetch.py --json`** attaches the same draft to a failed envelope as `reddit_draft` —
   or `{"refused": …}` when the article is OA, behind a bot wall, or flagged free by PubMed
   (those go to `library_session.py fetch`, which opens the publisher in a real browser).

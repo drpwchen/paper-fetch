@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] — 2026-11-21 — `reddit.auto_post`: a standing permission, off by default
+
+### Added
+- `reddit.auto_post` (default `false`) and an `auto_post` field on every draft (`draft --json`,
+  the state file, `reddit_draft` in a failed `paper_fetch.py --json` envelope). Off: an agent
+  shows the draft and posts nothing, as before. On: the user's standing permission for an agent
+  that was fetching that paper for them to post the request itself — through the user's own
+  posting integration, after the library layer also failed and after a `dedupe` that looked.
+  This repo still never posts; the field is what such an integration checks.
+
+### Changed
+- AGENTS.md: the "draft, never a post" rule names the one exception (`auto_post: true`) and
+  its preconditions.
+- Docs since 1.13.0 (untagged commit): CHANGELOG wording, the RSS path vs `poll_cmd`.
+
+### Tests
+- `tests/test_reddit_auto_post.py`: default false on the draft and the envelope draft; true
+  when configured; a refused envelope (OA) carries no draft to post.
+
 ## [1.13.0] — 2026-11-21 — poll reads threads again, through a browser hook
 
 Measured the evening of 2026-11-21, after logging the browser in: the `*.rss` feeds stay 404

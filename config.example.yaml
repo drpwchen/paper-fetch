@@ -157,3 +157,8 @@ rate:
 #  # https://www.reddit.com/comments/{id}.json — scripts get 403 there, a logged-in browser's
 #  # fetch() from a reddit.com page gets 200. Unset or failing: that thread is reported BLIND.
 #  poll_cmd: ["python", "/abs/path/my_reddit_thread_json.py", "{id}"]
+#  # Off by default: an agent shows you each draft and posts nothing. true = your standing
+#  # permission for an agent that was fetching a paper FOR you to post its r/Scholar request
+#  # itself (through your own posting integration, after a dedupe that looked). Every draft
+#  # carries "auto_post" so the integration can check. This repo itself never posts.
+#  auto_post: false
