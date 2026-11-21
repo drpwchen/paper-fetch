@@ -24,7 +24,7 @@ r/Scholar is your call. If you make it, this script does the bookkeeping — **i
   (those go to `library_session.py fetch`, which opens the publisher in a real browser).
 - **Reddit switched RSS off on 2026-11-13.** Measured 2026-11-21: every `*.rss` URL answers
   HTTP 404 with an Atom feed titled "Not Found" — for this script's User-Agent, for
-  python-requests' and curl's defaults, and from inside a logged-in browser; `search.json`
+  python-requests' and curl's defaults, and from inside a real browser (not logged in to Reddit; logged-in was not tested); `search.json`
   answers 403 and old.reddit redirects to a login page. Two consequences:
   - **`dedupe`** needs `reddit.dedupe_cmd` — a command that searches Reddit some other way
     (a real browser) and prints `{"existing": [...]}`. Without it, or when it fails, `dedupe`

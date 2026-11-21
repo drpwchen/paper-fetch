@@ -35,7 +35,7 @@ Exit codes: 0 ok · 1 usage · 2 nothing found (no metadata / PDF not verified) 
 Measured 2026-11-21: every `*.rss` URL (`/r/Scholar/search.rss`, `/r/Scholar/new.rss`,
 `/comments/<id>/.rss`, other subreddits too) answers HTTP 404 with an Atom feed titled
 "Not Found" — for this script's User-Agent, python-requests' and curl's defaults, and from
-inside a logged-in browser alike; `search.json` answers 403 and old.reddit redirects to a
+inside a real browser (not logged in; logged-in untested) alike; `search.json` answers 403 and old.reddit redirects to a
 login page. Reddit had announced the end of RSS for 13 November 2026. So:
 
 - `dedupe` cannot use the search feed. Point `reddit.dedupe_cmd` at something that can search

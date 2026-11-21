@@ -13,7 +13,7 @@ measured 2026-11-21 from the author's network:
 `/comments/<id>/.rss` and `/r/news/new.rss` all answer **HTTP 404** with an Atom body titled
 "Not Found" (`server: snooserv`, rate-limit headers still present) — with the paper-fetch
 User-Agent, python-requests' default UA and curl's default UA, and also via `fetch()` inside a
-logged-in browser. `search.json` answers 403 (HTML); `old.reddit.com/r/Scholar/new.rss`
+real browser (Edge, not logged in to Reddit — logged-in access was not tested). `search.json` answers 403 (HTML); `old.reddit.com/r/Scholar/new.rss`
 redirects to `/login/?reason=lor2`. The earlier 429s were the ordinary one-request-a-minute
 budget, not a disguised block. Before this release `dedupe` raised `RuntimeError("search HTTP
 404")`, which crashed any caller that only caught `RateLimited`, and `poll` logged `HTTP 404`
