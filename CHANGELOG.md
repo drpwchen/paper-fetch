@@ -7,7 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [1.12.0] — 2026-11-21 — Reddit switched RSS off: dedupe says "unavailable", poll says "blind"
 
-Reddit stopped serving RSS on 2026-11-13. Measured 2026-11-21 from the author's network:
+Reddit announced the end of RSS for 2026-11-13. Thread feeds still answered 200 on 2026-11-03;
+measured 2026-11-21 from the author's network:
 `/r/Scholar/search.rss?q="10.1038/nrd3988"&restrict_sr=1&sort=new`, `/r/Scholar/new.rss`,
 `/comments/<id>/.rss` and `/r/news/new.rss` all answer **HTTP 404** with an Atom body titled
 "Not Found" (`server: snooserv`, rate-limit headers still present) — with the paper-fetch
@@ -34,6 +35,8 @@ been closed as "no reply".
   `RateLimited` (exit 7).
 - `stale_days` closes a thread only when the last poll actually read its feed (200/304). An
   unreadable thread stays open instead of being written off as "no reply".
+
+- `CITATION.cff` version/date brought up to this release (it still said 1.10.0).
 
 ### Tests
 - `tests/test_reddit_dedupe.py` (22): 200 hit / 200 no match / 404 / 403 / 500 / HTML-200 /

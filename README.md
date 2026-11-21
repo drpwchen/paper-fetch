@@ -285,7 +285,9 @@ record could not be fetched.
 ### When every route fails: an r/Scholar request (drafted, never posted)
 
 `reddit_request.py` drafts an r/Scholar request, checks whether someone has already asked,
-and tracks and verifies replies. It never posts for you. Commands and scheduling →
+and tracks and verifies replies. It never posts for you. Since Reddit switched RSS off
+(announced for 2026-11-13), the check needs a browser-backed `reddit.dedupe_cmd` and reply
+watching is blind — `poll` says so (exit `10`) instead of reporting "no new replies". Commands and scheduling →
 [docs/reddit-request.md](docs/reddit-request.md).
 
 ### ⚠ Before you batch or parallelize

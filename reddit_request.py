@@ -6,7 +6,9 @@ When every route of the ladder has come back empty (paper_fetch exit 2, library_
 2 or 7 after the direct/nav retries), the remaining finishes are interlibrary loan, the
 author, or asking on r/Scholar. This script does the bookkeeping for the last one: it writes
 the request in the subreddit's own format, checks nobody already asked, then watches the
-thread so you hear about a reply instead of re-opening Reddit every few hours.
+thread so you hear about a reply instead of re-opening Reddit every few hours. (Since Reddit
+switched RSS off — announced for 2026-11-13 — checking needs `reddit.dedupe_cmd` and watching
+does not work; see the section on that below.)
 
 It never posts. Writing to someone else's community is a human act; the draft is printed
 for you to paste. (An integration that posts *as you, from your own logged-in browser, only
