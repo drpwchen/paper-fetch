@@ -24,11 +24,10 @@ had seen since 1.12.0 reported it blind.
   `poll` treats it like an unreadable feed — `BLIND`, exit `10`, one `poll_blind` — and records
   `poll_http: "cmd_failed"`, so `stale_days` does not close the thread.
 
-### Fixed
-- Off-Reddit links in a comment keep `&` in their query string (`&amp;` was kept as-is).
-
 ### Changed
 - Docs: logged-in RSS measured (404 too); "poll is blind" becomes "poll needs `poll_cmd`".
+- (Corrected after tagging: an earlier wording listed a "Fixed" `&amp;` entry. That handling
+  is only in the new `parse_listing`, which unescapes link URLs; `parse_feed` is unchanged.)
 
 ### Tests
 - `tests/test_reddit_poll_cmd.py` (17): entry shape and UTC time, escaped `body_html`, nested

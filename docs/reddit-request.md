@@ -42,11 +42,14 @@ r/Scholar is your call. If you make it, this script does the bookkeeping — **i
     succeeds and then fails), and `stale_days` does not close a thread it never managed to read.
 - **`poll`** reads each tracked thread's comments: a comment from anyone but you and
   AutoModerator → `replied`; one with an off-Reddit link → `fulfilled` (a candidate — links are
-  untrusted and never downloaded). Reddit allows an unauthenticated client about **one request
-  per minute** (`x-ratelimit-remaining: 0` after a single GET); `poll` waits out that budget
-  between threads and, on a 429, records a backoff and exits `7` instead of retrying. **Reddit
-  chat is in no RSS feed** — a fulfiller who answers only by chat is invisible to `poll`. Your
-  private inbox feed (`reddit.inbox_feed_secret`) adds comment replies and private messages.
+  untrusted and never downloaded). Through `reddit.poll_cmd` it waits 3–8 s between threads.
+  The rest of this paragraph describes the RSS path (before 2026-11-13): Reddit allowed an
+  unauthenticated client about **one request per minute** (`x-ratelimit-remaining: 0` after a
+  single GET); `poll` waits out that budget between threads and, on a 429, records a backoff and
+  exits `7` instead of retrying. **Reddit chat is in no feed and in no thread JSON** — a
+  fulfiller who answers only by chat is invisible to `poll`. The private inbox feed
+  (`reddit.inbox_feed_secret`) is RSS too and was not re-measured after the shutdown; expect
+  it to be gone.
 - **`verify`** runs `pdf_verify` against the article title (optionally `--registry NCT…`) and
   reminds you to reply `thanks solution verified`, which is how the subreddit scores fulfillers.
   If you checked the file by hand, `verify <id> --manual` records that; if you also replied
