@@ -148,3 +148,8 @@ rate:
 #      url_secret: "MY_WEBHOOK_URL"
 #    - type: command      # runs argv with the event JSON on stdin; use absolute paths
 #      argv: ["python", "/abs/path/my_notifier.py"]
+#  # Reddit switched RSS off on 2026-11-13, so `dedupe` can no longer read the search feed.
+#  # Point this at anything that can search Reddit (a real browser) — argv, "{doi}" is
+#  # substituted; it must exit 0 and print {"existing": [{"id","url","author","title"}, ...]}.
+#  # Unset: `dedupe` reports "unavailable" (exit 10) with the search page to check by hand.
+#  dedupe_cmd: ["python", "/abs/path/my_reddit_search.py", "{doi}"]

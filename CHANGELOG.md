@@ -5,6 +5,42 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] — 2026-11-21 — Reddit switched RSS off: dedupe says "unavailable", poll says "blind"
+
+Reddit stopped serving RSS on 2026-11-13. Measured 2026-11-21 from the author's network:
+`/r/Scholar/search.rss?q="10.1038/nrd3988"&restrict_sr=1&sort=new`, `/r/Scholar/new.rss`,
+`/comments/<id>/.rss` and `/r/news/new.rss` all answer **HTTP 404** with an Atom body titled
+"Not Found" (`server: snooserv`, rate-limit headers still present) — with the paper-fetch
+User-Agent, python-requests' default UA and curl's default UA, and also via `fetch()` inside a
+logged-in browser. `search.json` answers 403 (HTML); `old.reddit.com/r/Scholar/new.rss`
+redirects to `/login/?reason=lor2`. The earlier 429s were the ordinary one-request-a-minute
+budget, not a disguised block. Before this release `dedupe` raised `RuntimeError("search HTTP
+404")`, which crashed any caller that only caught `RateLimited`, and `poll` logged `HTTP 404`
+per thread and exited `0` — replies went unseen, and after `stale_days` the thread would have
+been closed as "no reply".
+
+### Added
+- `reddit.dedupe_cmd`: argv (`{doi}` substituted) for a command that searches Reddit some other
+  way and prints `{"existing": [...]}`. Used instead of the dead search feed when set.
+- `DedupeUnavailable` (carries `manual_url`, the r/Scholar search page for that DOI).
+  `reddit_request.py dedupe` turns it into exit **10** with `"existing": null`, `unavailable`
+  and `manual_url` on stdout — never `[]`.
+- `poll`: a thread whose feed cannot be read is reported `BLIND` with its URL, the run exits
+  **10**, and one `poll_blind` event (with an `action` line) goes to the notify sinks per thread.
+
+### Fixed
+- `dedupe` no longer crashes on a non-200: 404 / 403 / 5xx / network errors and a 200 that is
+  not an Atom feed (an HTML page parses as XML too) are all `DedupeUnavailable`; 429 stays
+  `RateLimited` (exit 7).
+- `stale_days` closes a thread only when the last poll actually read its feed (200/304). An
+  unreadable thread stays open instead of being written off as "no reply".
+
+### Tests
+- `tests/test_reddit_dedupe.py` (22): 200 hit / 200 no match / 404 / 403 / 500 / HTML-200 /
+  network error / 429 (and a real `reddit_get` 429 writing backoff to a temp state), the
+  `dedupe_cmd` hook (success, empty, non-zero exit, no JSON, `existing: null`), CLI exits 0/7/10,
+  `poll` blind → exit 10 + one event, stale guard both ways, blind flag cleared on recovery.
+
 ## [1.11.1] — 2026-11-15 — AGENTS.md slimmed; long-form lessons moved to docs/
 
 Documentation only; no code or behaviour change (`VERSION` stays 1.11.0).

@@ -2,7 +2,7 @@
 
 ```bash
 python reddit_request.py draft 10.1136/annrheumdis-2021-219846 --dest pdfs/So2021.pdf  # OA gate, then title + body
-python reddit_request.py dedupe 10.1136/annrheumdis-2021-219846  # has someone asked already?
+python reddit_request.py dedupe 10.1136/annrheumdis-2021-219846  # has someone asked already? (needs reddit.dedupe_cmd)
 python reddit_request.py track https://www.reddit.com/r/Scholar/comments/<id>/ --doi <DOI>
 python reddit_request.py poll                                    # schedule this every 30 min
 python reddit_request.py verify <id> received.pdf                # is it the article? → verified
@@ -22,6 +22,17 @@ r/Scholar is your call. If you make it, this script does the bookkeeping — **i
 - **`paper_fetch.py --json`** attaches the same draft to a failed envelope as `reddit_draft` —
   or `{"refused": …}` when the article is OA, behind a bot wall, or flagged free by PubMed
   (those go to `library_session.py fetch`, which opens the publisher in a real browser).
+- **Reddit switched RSS off on 2026-11-13.** Measured 2026-11-21: every `*.rss` URL answers
+  HTTP 404 with an Atom feed titled "Not Found" — for this script's User-Agent, for
+  python-requests' and curl's defaults, and from inside a logged-in browser; `search.json`
+  answers 403 and old.reddit redirects to a login page. Two consequences:
+  - **`dedupe`** needs `reddit.dedupe_cmd` — a command that searches Reddit some other way
+    (a real browser) and prints `{"existing": [...]}`. Without it, or when it fails, `dedupe`
+    exits `10`, prints `"existing": null` (never `[]`: "could not look" is not "nobody asked")
+    and the search page URL to check by hand. 429 stays exit `7`.
+  - **`poll`** cannot read thread feeds: it exits `10`, lists the threads to open by hand,
+    emits one `poll_blind` event per thread (again only after a feed comes back and goes
+    away), and `stale_days` no longer closes a thread it never managed to read.
 - **`poll`** reads each tracked thread's comment feed: a comment from anyone but you and
   AutoModerator → `replied`; one with an off-Reddit link → `fulfilled` (a candidate — links are
   untrusted and never downloaded). Reddit allows an unauthenticated client about **one request

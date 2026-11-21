@@ -24,7 +24,24 @@ when you say so* can sit on top of `track` — this repo does not ship one.)
 Exit codes: 0 ok · 1 usage · 2 nothing found (no metadata / PDF not verified) ·
 7 rate-limited by Reddit (backoff recorded in the state file — wait, do not loop) ·
 8 refused: the article is open access — fetch it, do not ask strangers for it ·
-9 notify-test: a sink failed, or no sink is usable.
+9 notify-test: a sink failed, or no sink is usable ·
+10 Reddit could not be read: `dedupe` could not check (stdout says `"existing": null` and
+   prints the search page to check by hand), or `poll` could not read a thread's feed.
+
+## Reddit switched RSS off on 2026-11-13 — dedupe needs a browser, poll is blind
+
+Measured 2026-11-21: every `*.rss` URL (`/r/Scholar/search.rss`, `/r/Scholar/new.rss`,
+`/comments/<id>/.rss`, other subreddits too) answers HTTP 404 with an Atom feed titled
+"Not Found" — for this script's User-Agent, python-requests' and curl's defaults, and from
+inside a logged-in browser alike; `search.json` answers 403 and old.reddit redirects to a
+login page. Reddit had announced the end of RSS for 13 November 2026. So:
+
+- `dedupe` cannot use the search feed. Point `reddit.dedupe_cmd` at something that can search
+  Reddit (a real browser); without it, `dedupe` says "unavailable" — it never reports
+  "nobody asked" when it could not look. A caller must not post on an unavailable dedupe
+  unless a person checked the printed search page.
+- `poll` cannot see replies. It exits 10, names the threads to open by hand, sends one
+  `poll_blind` event per thread, and `stale_days` no longer closes a thread it could not read.
 
 ## Why the OA gate refuses instead of warning (2026-10-24)
 
@@ -82,7 +99,7 @@ import requests
 
 from paper_config import CFG
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 _R = {
     "subreddit": "Scholar",
     "state_dir": "",
@@ -94,6 +111,7 @@ _R = {
     "on_active": [],        # argv run when a request starts being tracked (e.g. enable the scheduler)
     "on_idle": [],          # argv run when poll finds nothing left to watch (e.g. disable it)
     "notify": [],
+    "dedupe_cmd": [],       # argv, "{doi}" substituted; prints {"existing": [...]} (see dedupe())
     **(CFG.get("reddit") or {}),
 }
 STATE_DIR = pathlib.Path(os.path.expanduser(os.environ.get("PAPERFETCH_REDDIT_STATE")
@@ -111,6 +129,15 @@ ORDER = ("drafted", "posted", "replied", "fulfilled", "verified", "closed")
 
 class RateLimited(Exception):
     pass
+
+
+class DedupeUnavailable(Exception):
+    """dedupe could not look — which is NOT "nobody asked". `manual_url` is the search page
+    a person can open to check by hand."""
+
+    def __init__(self, why: str, manual_url: str):
+        super().__init__(why)
+        self.manual_url = manual_url
 
 
 # ── state ────────────────────────────────────────────────────────────────────
@@ -253,6 +280,8 @@ _ACTION = {
                 "DMs (log in as the poster)."),
     "stale": "Closed with no reply. Interlibrary loan or writing to the author are the next steps.",
     "inbox": "Log in to Reddit and read your inbox (private messages are not in any feed).",
+    "poll_blind": ("Reddit no longer serves this thread's feed, so replies are not watched. "
+                   "Open the thread yourself to check; `close {id}` once you are done."),
 }
 
 
@@ -770,13 +799,60 @@ def cmd_draft(a) -> int:
     return 0
 
 
+def search_url(doi: str) -> str:
+    """The r/<sub> search page for this DOI — what a person opens to check by hand."""
+    q = requests.utils.quote(f'"{doi}"', safe="")
+    return f"https://www.reddit.com/r/{_R['subreddit']}/search/?q={q}&type=posts&sort=new"
+
+
+def _dedupe_cmd(doi: str, manual: str) -> list[dict]:
+    """Run reddit.dedupe_cmd ("{doi}" substituted). It must exit 0 and print one JSON object
+    {"existing": [{"id", "url", "author", "title"}, ...]} on stdout; anything else means it
+    could not look."""
+    argv = [str(x).replace("{doi}", doi) for x in _R["dedupe_cmd"]]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise DedupeUnavailable(f"dedupe_cmd: {type(e).__name__}: {e}"[:200], manual) from None
+    tail = (p.stderr or "").strip().splitlines()[-1:] or [""]
+    if p.returncode != 0:
+        raise DedupeUnavailable(f"dedupe_cmd exit {p.returncode}: {tail[0][:160]}", manual)
+    try:
+        hits = json.loads(p.stdout.strip().splitlines()[-1])["existing"]
+        assert isinstance(hits, list)
+    except Exception:
+        raise DedupeUnavailable(f"dedupe_cmd printed no {{\"existing\": [...]}} JSON "
+                                f"({tail[0][:120]})", manual) from None
+    return hits
+
+
 def dedupe(st: dict, doi: str) -> list[dict]:
+    """Requests for this DOI already on r/<sub>: a list (empty = looked, nobody asked).
+    Raises DedupeUnavailable when it could not look and RateLimited on Reddit's 429.
+    `reddit.dedupe_cmd` is used when set — since Reddit switched RSS off (2026-11-13) the
+    search feed below answers 404, so a real search needs a browser behind that hook."""
+    manual = search_url(doi)
+    if _R.get("dedupe_cmd"):
+        return _dedupe_cmd(doi, manual)
     q = requests.utils.quote(f'"{doi}"')
-    r = reddit_get(st, f"https://www.reddit.com/r/{_R['subreddit']}/search.rss"
-                       f"?q={q}&restrict_sr=1&sort=new")
+    try:
+        r = reddit_get(st, f"https://www.reddit.com/r/{_R['subreddit']}/search.rss"
+                           f"?q={q}&restrict_sr=1&sort=new")
+    except requests.RequestException as e:
+        raise DedupeUnavailable(f"search feed: {type(e).__name__}", manual) from None
     if r.status_code != 200:
-        raise RuntimeError(f"search HTTP {r.status_code}")
-    hits = [e for e in parse_feed(r.text) if e["id"].startswith("t3_")
+        why = f"search feed HTTP {r.status_code}"
+        if r.status_code == 404:
+            why += " (Reddit switched RSS off on 2026-11-13; set reddit.dedupe_cmd)"
+        raise DedupeUnavailable(why, manual)
+    try:                                  # an HTML page parses as XML too — demand an Atom feed
+        if ET.fromstring(r.text).tag != f"{ATOM}feed":
+            raise ET.ParseError("not an Atom feed")
+        feed = parse_feed(r.text)
+    except ET.ParseError:
+        raise DedupeUnavailable("search feed: HTTP 200 but not a feed", manual) from None
+    hits = [e for e in feed if e["id"].startswith("t3_")
             and doi.lower() in (e["title"] + " " + e["text"]).lower()]
     return [{"id": e["id"][3:], "url": e["link"], "author": e["author"], "title": e["title"]}
             for e in hits]
@@ -785,7 +861,19 @@ def dedupe(st: dict, doi: str) -> list[dict]:
 def cmd_dedupe(a) -> int:
     st = load_state()
     doi = a.doi.strip().removeprefix("https://doi.org/").lower()
-    hits = dedupe(st, doi)
+    try:
+        hits = dedupe(st, doi)
+    except DedupeUnavailable as e:
+        print(json.dumps({"doi": doi, "existing": None, "unavailable": str(e),
+                          "manual_url": e.manual_url}, ensure_ascii=False))
+        print(f"dedupe unavailable: {e}\n  check by hand before posting: {e.manual_url}",
+              file=sys.stderr)
+        return 10
+    except RateLimited as e:
+        print(json.dumps({"doi": doi, "existing": None, "rate_limited": str(e),
+                          "manual_url": search_url(doi)}, ensure_ascii=False))
+        print(f"dedupe rate-limited: {e} — wait, do not loop", file=sys.stderr)
+        return 7
     print(json.dumps({"doi": doi, "existing": hits}, ensure_ascii=False))
     if hits:
         print(f"already requested {len(hits)}× — track that thread instead of posting again: "
@@ -884,6 +972,8 @@ def _close_stale(st: dict) -> None:
     for rec in st["posts"].values():
         if rec["status"] != "posted":
             continue
+        if rec.get("poll_http") not in (200, 304):  # never read (or feed gone): "no reply" is
+            continue                                # unknown, not observed — keep it open
         when = rec.get("posted_at") or rec.get("created", "")
         try:
             t = _dt.datetime.fromisoformat(when.replace(" ", "T"))
@@ -936,11 +1026,17 @@ def cmd_poll(a) -> int:
                 hdr["If-Modified-Since"] = rec["last_modified"]
             r = reddit_get(st, f"https://www.reddit.com/comments/{rec['id']}/.rss", hdr)
             rec["polled"] = _now()
+            rec["poll_http"] = r.status_code
+            if r.status_code in (200, 304):
+                rec.pop("blind_notified", None)
             if r.status_code == 304:
                 report.append({"id": rec["id"], "http": 304, "events": []})
                 continue
             if r.status_code != 200:
                 report.append({"id": rec["id"], "http": r.status_code, "events": []})
+                if not rec.get("blind_notified"):
+                    rec["blind_notified"] = _now()
+                    emit("poll_blind", rec, http=r.status_code)
                 continue
             rec["etag"] = r.headers.get("etag") or rec.get("etag")
             rec["last_modified"] = r.headers.get("last-modified") or rec.get("last_modified")
@@ -957,12 +1053,19 @@ def cmd_poll(a) -> int:
             print(json.dumps({"polled": report, "rate_limited": str(e)}))
         return 7
     save_state(st)
+    blind = [x for x in report if x["http"] not in (200, 304)]
     if a.json:
-        print(json.dumps({"polled": report}, ensure_ascii=False))
+        print(json.dumps({"polled": report, "blind": [x["id"] for x in blind]}, ensure_ascii=False))
     else:
         for x in report:
             print(f"{x['id']}  HTTP {x['http']}  {x.get('status', '')}  "
                   f"{', '.join(x['events']) or 'no new events'}")
+    if blind:
+        print(f"[poll] BLIND: {len(blind)} thread feed(s) unreadable (Reddit switched RSS off on "
+              "2026-11-13) — replies are NOT being watched. Open by hand:\n  "
+              + "\n  ".join(st["posts"][x["id"]].get("url") or x["id"] for x in blind),
+              file=sys.stderr)
+        return 10
     return 0
 
 
